@@ -95,6 +95,10 @@ namespace PpcGen {
 		Write32(instr);
 	}
 
+	void PPCXEmitter::ADDC	(PPCReg Rd, PPCReg Ra, PPCReg Rb) {
+		XO_FORM(31, Rd, Ra, Rb, 0, 10, 0);
+	}
+
 	void PPCXEmitter::ADDI	(PPCReg Rd, PPCReg Ra, short imm) {
 		u32 instr = (0x38000000  | (Rd << 21) | (Ra << 16) | ((imm) & 0xffff));
 		Write32(instr);
@@ -466,6 +470,10 @@ namespace PpcGen {
 		u32 instr = (0x68000000 | (Ra << 21) | (Rdest << 16) | (imm & 0xffff));
 		Write32(instr);
 	}
+	void PPCXEmitter::XORIS	(PPCReg Rdest, PPCReg Ra, unsigned short imm) {	
+		u32 instr = ((27 << 26) | (Ra << 21) | (Rdest << 16) | (imm & 0xffff));
+		Write32(instr);
+	}
 
 	void PPCXEmitter::OR(PPCReg Rdest, PPCReg Ra, PPCReg Rb) {	
 		u32 instr = (0x7C000378 | (Ra << 21) | (Rdest << 16) | (Rb << 11));
@@ -521,8 +529,11 @@ namespace PpcGen {
 	}
 
 	void PPCXEmitter::QuickCallFunction(void *func) {
-		/** TODO : can use simple jump **/
-		
+		intptr_t diff = (intptr_t)func - (intptr_t)code;
+		if (diff >= -0x01FFFFFC && diff <= 0x01FFFFFC) {
+			BL(func);
+			return;
+		}
 		u32 func_addr = (uintptr_t) func;
 		// Load func address
 		MOVI2R(R0, func_addr);
@@ -550,7 +561,15 @@ namespace PpcGen {
 	}
 
 	void PPCXEmitter::RLWINM (PPCReg dest, PPCReg src, int shift, int start, int end) {
-		Write32((21<<26) | (src << 21) | (dest << 16) | (shift << 11) | (start << 6) | (end << 1));
+		Write32((21<<26) | (src << 21) | (dest << 16) | ((shift & 0x1f) << 11) | ((start & 0x1f) << 6) | ((end & 0x1f) << 1));
+	}
+
+	void PPCXEmitter::RLWIMI (PPCReg dest, PPCReg src, int shift, int start, int end) {
+		Write32((20<<26) | (src << 21) | (dest << 16) | ((shift & 0x1f) << 11) | ((start & 0x1f) << 6) | ((end & 0x1f) << 1));
+	}
+
+	void PPCXEmitter::CNTLZW (PPCReg dest, PPCReg src) {
+		X_FORM(31, src, dest, 0, 26, 0);
 	}
 
 	void PPCXEmitter::RLDICL (PPCReg Rs,	PPCReg Ra, int sh, int mb) {
@@ -578,21 +597,24 @@ namespace PpcGen {
 	}
 
 	void PPCXEmitter::SRWI	(PPCReg dest, PPCReg src, unsigned short imm) {
-		RLWINM(dest, src, (32-imm), imm, 31);
+		RLWINM(dest, src, (32-imm) & 0x1f, imm, 31);
 	}
 	
 	void PPCXEmitter::ROTRW	(PPCReg dest, PPCReg src, PPCReg shift) {
-		
+		SUBFIC(R0, shift, 32);
+		ROTLW(dest, src, R0);
 	}
 
 	void PPCXEmitter::ROTRWI(PPCReg dest, PPCReg src, unsigned short imm) {
-		RLWINM(dest, src, (32-imm), 0, 31);
+		RLWINM(dest, src, (32-imm) & 0x1f, 0, 31);
 	}
 
 	void  PPCXEmitter::ROTLW	(PPCReg dest, PPCReg src, PPCReg shift) {
+		Write32((23<<26) | (src << 21) | (dest << 16) | (shift << 11) | (0 << 6) | (31 << 1));
 	}
 
 	void  PPCXEmitter::ROTLWI	(PPCReg dest, PPCReg src, unsigned short imm) {
+		RLWINM(dest, src, imm & 0x1f, 0, 31);
 	}
 
 	// Fpu
@@ -611,58 +633,31 @@ namespace PpcGen {
 
 	
 	void PPCXEmitter::MOVI2F	(PPCReg dest, float imm, bool negate) {
-		static u32 tmp;
-
 		union convert { 
 			unsigned int i; 
 			float f; 
 		} fc;
 
 		fc.f = imm;
+		if (negate) {
+			fc.i ^= 0x80000000U;
+		}
 
 		MOVI2R(R6, fc.i);
-
-		// R7 = imm
-		MOVI2R(R7, (uintptr_t)&tmp);
-		STW(R6, R7);
-
-		// dest = R7
-		LFS(dest, R7, 0);
-
-		if (negate == true) {
-			FNEG(dest, dest);
-		}
+		STW(R6, R1, 16);
+		LFS(dest, R1, 16);
 	}
 	
 	void PPCXEmitter::SaveFloatSwap(PPCReg FRt, PPCReg Base, PPCReg offset) {
-		// used for swapping float ...
-		// TODO: maybe just use the stack ?
-		static u32 tmp;
-
-		// Save Value in tmp	
-		MOVI2R(R7, (uintptr_t)&tmp);
-		SFS(FRt, R7, 0);
-
-		// Load the value in R6
-		LWZ(R6, R7); 
-		
-		// Save the final value
-		STWBRX(R6, Base, offset); 
+		SFS(FRt, R1, 16);
+		LWZ(R6, R1, 16);
+		STWBRX(R6, Base, offset);
 	}
 
 	void PPCXEmitter::LoadFloatSwap(PPCReg FRt, PPCReg Base, PPCReg offset) {
-		// used for swapping float ...
-		static u32 tmp;
-		
-		// Load Value into a temp REG
-		LWBRX(R6, Base, offset); 
-
-		// Save it in tmp
-		MOVI2R(R7, (uintptr_t)&tmp);
-		STW(R6, R7);
-
-		// Load the final value
-		LFS(FRt, R7, 0);
+		LWBRX(R6, Base, offset);
+		STW(R6, R1, 16);
+		LFS(FRt, R1, 16);
 	}
 	void PPCXEmitter::MTFSB0(int bt) {
 		X_FORM(63, bt, 0, 0, 70, 0);
@@ -680,6 +675,9 @@ namespace PpcGen {
 	}
 	void PPCXEmitter::FCTIW	(PPCReg FRt, PPCReg FRb) {
 		X_FORM(63, FRt, 0, FRb, 14, 0);
+	}
+	void PPCXEmitter::FCTIWZ(PPCReg FRt, PPCReg FRb) {
+		X_FORM(63, FRt, 0, FRb, 15, 0);
 	}
 	void PPCXEmitter::STFIWX(PPCReg FRt, PPCReg FRa, PPCReg FRb) {
 		X_FORM(31, FRt, FRa, FRb, 983, 0);
@@ -748,6 +746,9 @@ namespace PpcGen {
 	}
 	void PPCXEmitter::FRES	(PPCReg FRt, PPCReg FRb) {
 		Break();
+	}
+	void PPCXEmitter::FRSQRTE(PPCReg FRt, PPCReg FRb) {
+		A_FORM(63, FRt, 0, FRb, 0, 26, 0);
 	}
 
 	// Fpu mul add
@@ -982,7 +983,9 @@ namespace PpcGen {
 	// Always clear code space with breakpoints, so that if someone accidentally executes
 	// uninitialized, it just breaks into the debugger.
 	void PPCXCodeBlock::PoisonMemory(int offset) {
+#ifndef __wiiu__
 		memset(region + offset, 0x00, region_size - offset);
+#endif
 	}
 
 } // namespace

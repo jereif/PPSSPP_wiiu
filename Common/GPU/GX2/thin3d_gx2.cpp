@@ -228,7 +228,7 @@ public:
 class GX2BlendState : public BlendState {
 public:
 	GX2BlendState(const BlendStateDesc &desc) {
-		GX2InitBlendControlReg(&reg, GX2_RENDER_TARGET_0, blendToGX2[(int)desc.srcCol], blendToGX2[(int)desc.dstCol], blendOpToGX2[(int)desc.eqCol], (int)desc.srcAlpha && (int)desc.dstAlpha, blendToGX2[(int)desc.srcAlpha], blendToGX2[(int)desc.dstAlpha], blendOpToGX2[(int)desc.eqAlpha]);
+		GX2InitBlendControlReg(&reg, GX2_RENDER_TARGET_0, blendToGX2[(int)desc.srcCol], blendToGX2[(int)desc.dstCol], blendOpToGX2[(int)desc.eqCol], desc.srcAlpha != desc.srcCol || desc.dstAlpha != desc.dstCol || desc.eqAlpha != desc.eqCol, blendToGX2[(int)desc.srcAlpha], blendToGX2[(int)desc.dstAlpha], blendOpToGX2[(int)desc.eqAlpha]);
 		GX2InitColorControlReg(&color_reg, desc.logicEnabled ? logicOpToGX2[(int)desc.logicOp] : GX2_LOGIC_OP_COPY, desc.enabled ? 0xFF : 0x00, false, desc.colorMask != 0);
 		GX2InitTargetChannelMasksReg(&mask_reg, (GX2ChannelMask)desc.colorMask, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0);
 		logicEnabled = desc.logicEnabled;

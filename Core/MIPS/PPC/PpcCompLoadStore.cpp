@@ -152,7 +152,7 @@ void Jit::Comp_ITypeMem(MIPSOpcode op) {
 	}
 
 	void Jit::Comp_Cache(MIPSOpcode op) {
-		DISABLE;
+		return;
 	}
 }
 #endif

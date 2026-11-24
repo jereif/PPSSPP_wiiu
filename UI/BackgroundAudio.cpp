@@ -4,7 +4,9 @@
 #include "Common/File/VFS/VFS.h"
 #include "Common/UI/Root.h"
 
+#include "ppsspp_config.h"
 #include "Common/CommonTypes.h"
+#include "Common/Swap.h"
 #include "Common/Data/Format/RIFF.h"
 #include "Common/Log.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -96,14 +98,14 @@ void WavData::Read(RIFFReader &file_) {
 			smplData.resize(file_.GetCurrentChunkSize());
 			file_.ReadData(&smplData[0], (int)smplData.size());
 
-			int numLoops = *(int *)&smplData[28];
+			int numLoops = *(s32_le *)&smplData[28];
 			struct AtracLoopInfo {
-				int cuePointID;
-				int type;
-				int startSample;
-				int endSample;
-				int fraction;
-				int playCount;
+				s32_le cuePointID;
+				s32_le type;
+				s32_le startSample;
+				s32_le endSample;
+				s32_le fraction;
+				s32_le playCount;
 			};
 
 			if (numLoops > 0 && smplData.size() >= 36 + sizeof(AtracLoopInfo) * numLoops) {
@@ -274,7 +276,10 @@ BackgroundAudio::Sample *BackgroundAudio::LoadSample(const std::string &path) {
 	}
 
 	int16_t *samples = new int16_t[2 * wave.numFrames];
-	memcpy(samples, wave.raw_data, wave.numFrames * wave.raw_bytes_per_frame);
+	const s16_le *src = (const s16_le *)wave.raw_data;
+	for (int i = 0; i < 2 * wave.numFrames; i++) {
+		samples[i] = src[i];
+	}
 
 	return new BackgroundAudio::Sample(samples, wave.numFrames);
 }

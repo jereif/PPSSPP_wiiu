@@ -343,7 +343,6 @@ void Jit::Comp_FPUComp(MIPSOpcode op) {
 #endif
 
 void Jit::Comp_FPU2op(MIPSOpcode op) {
-	DISABLE
 	CONDITIONAL_DISABLE;
 
 	int fs = _FS;
@@ -351,12 +350,16 @@ void Jit::Comp_FPU2op(MIPSOpcode op) {
 
 	switch (op & 0x3f) 
 	{
-#if !PPSSPP_ARCH(PPC750)
 	case 4:	//F(fd)	   = sqrtf(F(fs));            break; //sqrt
 		fpr.MapDirtyIn(fd, fs);
+#if !PPSSPP_ARCH(PPC750)
 		FSQRTS(fpr.R(fd), fpr.R(fs));
-		break;
+#else
+		FMR(FPR4, fpr.R(fs));
+		BL(ppcSqrt);
+		FRSP(fpr.R(fd), FPR4);
 #endif
+		break;
 	case 5:	//F(fd)    = fabsf(F(fs));            break; //abs
 		fpr.MapDirtyIn(fd, fs);
 		FABS(fpr.R(fd), fpr.R(fs));
@@ -371,14 +374,34 @@ void Jit::Comp_FPU2op(MIPSOpcode op) {
 		break;
 
 	case 13: //	FsI(fd) = F(fs)>=0 ? (int)floorf(F(fs)) : (int)ceilf(F(fs));	break;	//trunc.w.s
-		fpr.MapDirtyIn(fd, fs);
-		FRIZ(fpr.R(fd), fpr.R(fs));
+		fpr.MapReg(fs);
+		FCTIWZ(FPR6, fpr.R(fs));
+		SFD(FPR6, R1, 16);
+		fpr.FlushR(fd);
+		LWZ(SREG, R1, 20);
+		STW(SREG, CTXREG, fpr.GetMipsRegOffset(fd));
+		break;
+
+	case 32: //	F(fd) = (float)FsI(fs);											break;	//cvt.s.w
+		fpr.FlushR(fs);
+		LWZ(SREG, CTXREG, fpr.GetMipsRegOffset(fs));
+		LIS(R6, 0x4330);
+		XORIS(SREG, SREG, 0x8000);
+		STW(R6, R1, 16);
+		STW(SREG, R1, 20);
+		LFD(FPR6, R1, 16);
+		LIS(R7, 0x8000);
+		STW(R6, R1, 24);
+		STW(R7, R1, 28);
+		LFD(FPR7, R1, 24);
+		fpr.MapReg(fd, MAP_DIRTY | MAP_NOINIT);
+		FSUB(fpr.R(fd), FPR6, FPR7);
+		FRSP(fpr.R(fd), fpr.R(fd));
 		break;
 		/*
 	case 12: //	FsI(fd) = (int)floorf(F(fs)+0.5f);								break;	//round.w.s
 	case 14: //	FsI(fd) = (int)ceilf (F(fs));									break;	//ceil.w.s
 	case 15: //	FsI(fd) = (int)floorf(F(fs));									break;	//floor.w.s
-	case 32: //	F(fd) = (float)FsI(fs);											break;	//cvt.s.w
 
 	case 36:
 		//switch (currentMIPS->fcr31 & 3)
@@ -408,6 +431,8 @@ void Jit::Comp_mxc1(MIPSOpcode op) {
 	switch ((op >> 21) & 0x1f)
 	{
 	case 0: // R(rt) = FI(fs); break; //mfc1
+		if (rt == 0)
+			return;
 		// Let's just go through RAM for now.
 		fpr.FlushR(fs);
 		gpr.MapReg(rt, MAP_DIRTY | MAP_NOINIT);
@@ -415,6 +440,8 @@ void Jit::Comp_mxc1(MIPSOpcode op) {
 		return;
 
 	case 2: //cfc1
+		if (rt == 0)
+			return;
 		if (fs == 31)
 		{	
 			/* Todo Lazy code ! */

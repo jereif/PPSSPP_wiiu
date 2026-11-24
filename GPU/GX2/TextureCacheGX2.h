@@ -60,6 +60,7 @@ public:
 	}
 
 	void ForgetLastTexture() override;
+	GX2Texture *GetLastBoundTextureForDebug() const;
 	void InvalidateLastTexture() override;
 
 	bool GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level) override;

@@ -35,6 +35,10 @@ bool PlatformIsWXExclusive();
 // AllocateMemoryPages is simpler and more generic. Note that on W^X platforms, this will return executable but not writable
 // memory!
 void* AllocateExecutableMemory(size_t size);
+#ifdef __wiiu__
+// Largest executable block that AllocateExecutableMemory can currently return.
+size_t GetMaxExecutableAllocSize();
+#endif
 void* AllocateMemoryPages(size_t size, uint32_t memProtFlags);
 // Note that on platforms returning PlatformIsWXExclusive, you cannot set a page to be both readable and writable at the same time.
 bool ProtectMemoryPages(const void* ptr, size_t size, uint32_t memProtFlags);

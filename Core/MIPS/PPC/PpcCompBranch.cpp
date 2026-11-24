@@ -398,9 +398,11 @@ void Jit::Comp_JumpReg(MIPSOpcode op) {
 	case 8: //jr
 		break;
 	case 9: //jalr
-		// mips->reg = js.compilerPC + 8;
-		MOVI2R(SREG, js.compilerPC + 8);
-		STW(SREG, CTXREG, (int)rd * 4);
+		if (rd != 0) {
+			// mips->reg = js.compilerPC + 8;
+			MOVI2R(SREG, js.compilerPC + 8);
+			STW(SREG, CTXREG, (int)rd * 4);
+		}
 		break;
 	default:
 		_dbg_assert_msg_(0,"Trying to compile instruction that can't be compiled");
@@ -424,14 +426,10 @@ void Jit::Comp_Syscall(MIPSOpcode op) {
 	SaveDowncount(DCNTREG);
 #ifdef __wiiu__
 	// R3 is expected to contain the address of the 4-byte MIPSOpcode struct ...
-	ADDI(R1, R1, -8);
-	STWU(R3, R1, 0);
-	MR(R3, R1);
+	STW(R3, R1, 20);
+	ADDI(R3, R1, 20);
 #endif
 	QuickCallFunction((void *)&CallSyscall);
-#ifdef __wiiu__
-	ADDI(R1, R1, 8);
-#endif
 
 	RestoreDowncount(DCNTREG);
 

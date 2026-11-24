@@ -2,6 +2,7 @@
 #if PPSSPP_ARCH(POWERPC)
 
 #include "Common/Profiler/Profiler.h"
+#include "Common/MemoryUtil.h"
 #include "Common/Serialize/Serializer.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
@@ -16,6 +17,13 @@
 #include "PpcJit.h"
 
 #include <malloc.h>
+#ifdef __wiiu__
+#include <wiiu/os/time.h>
+#endif
+#include <map>
+#include <string>
+#include <vector>
+#include <algorithm>
 //#include <ppcintrinsics.h>
 
 using namespace PpcGen;
@@ -26,6 +34,32 @@ namespace MIPSComp
 {
 
 static u32 delaySlotFlagsValue;
+
+// Diagnostics: count how many ops fall back to the interpreter (per opcode name, at compile time).
+static std::map<std::string, int> g_fallbackCounts;
+static int g_compiledBlocks = 0;
+static int g_cacheClears = 0;
+static u64 g_compileTicks = 0;
+static u64 g_firstCompileTick = 0;
+
+static void LogJitStats(const char *reason, size_t spaceLeft, size_t regionSize) {
+	NOTICE_LOG(JIT, "JIT stats [%s]: blocks=%d clears=%d used=%d/%d bytes compile=%d ms of %d ms wall",
+		reason, g_compiledBlocks, g_cacheClears, (int)(regionSize - spaceLeft), (int)regionSize,
+		(int)ticks_to_ms(g_compileTicks), g_firstCompileTick ? (int)ticks_to_ms(OSGetSystemTime() - g_firstCompileTick) : 0);
+	std::vector<std::pair<int, std::string>> sorted;
+	for (auto &it : g_fallbackCounts)
+		sorted.push_back(std::make_pair(it.second, it.first));
+	std::sort(sorted.begin(), sorted.end(), [](const std::pair<int, std::string> &a, const std::pair<int, std::string> &b) {
+		return a.first > b.first;
+	});
+	std::string line;
+	for (size_t i = 0; i < sorted.size() && i < 25; i++) {
+		char buf[64];
+		snprintf(buf, sizeof(buf), "%s=%d ", sorted[i].second.c_str(), sorted[i].first);
+		line += buf;
+	}
+	NOTICE_LOG(JIT, "JIT fallbacks: %s", line.c_str());
+}
 
 void Jit::CompileDelaySlot(int flags)
 {
@@ -58,8 +92,14 @@ void Jit::CompileDelaySlot(int flags)
 void Jit::Compile(u32 em_address)
 {
 	PROFILE_THIS_SCOPE("jitc");
-	if (GetSpaceLeft() < 0x10000 || blocks.IsFull())
+	u64 compileStart = OSGetSystemTime();
+	if (!g_firstCompileTick)
+		g_firstCompileTick = compileStart;
+	if (GetSpaceLeft() < 0x4000 || blocks.IsFull())
 	{
+		g_cacheClears++;
+		NOTICE_LOG(JIT, "Clearing JIT cache (spaceLeft=%d, blocksFull=%d)", (int)GetSpaceLeft(), (int)blocks.IsFull());
+		LogJitStats("clear", GetSpaceLeft(), region_size);
 		ClearCache();
 	}
 
@@ -67,6 +107,9 @@ void Jit::Compile(u32 em_address)
 	JitBlock *b = blocks.GetBlock(block_num);
 	DoJit(em_address, b);
 	blocks.FinalizeBlock(block_num, jo.enableBlocklink);
+	if ((++g_compiledBlocks % 4000) == 0) {
+		LogJitStats("periodic", GetSpaceLeft(), region_size);
+	}
 
 	// Drat.  The VFPU hit an uneaten prefix at the end of a block.
 	if (js.startDefaultPrefix && js.MayHavePrefix())
@@ -78,6 +121,7 @@ void Jit::Compile(u32 em_address)
 		// Let's try that one more time.  We won't get back here because we toggled the value.
 		Compile(em_address);
 	}
+	g_compileTicks += OSGetSystemTime() - compileStart;
 }
 
 bool Jit::DescribeCodePtr(const u8 *ptr, std::string &name)
@@ -158,6 +202,10 @@ void Jit::WriteDownCount(int offset)
 }
 
 void Jit::Comp_Generic(MIPSOpcode op) {
+	{
+		const char *name = MIPSGetName(op);
+		g_fallbackCounts[name ? name : "?"]++;
+	}
 	FlushAll();
 
 	// basic jit !!
@@ -173,14 +221,10 @@ void Jit::Comp_Generic(MIPSOpcode op) {
 		MOVI2R(R3, op.encoding);
 #ifdef __wiiu__
 		// R3 is expected to contain the address of the 4-byte MIPSOpcode struct ...
-		ADDI(R1, R1, -8);
-		STWU(R3, R1, 0);
-		MR(R3, R1);
+		STW(R3, R1, 20);
+		ADDI(R3, R1, 20);
 #endif
 		QuickCallFunction((void *)func);
-#ifdef __wiiu__
-		ADDI(R1, R1, 8);
-#endif
 
 		// restore pc and cycles
 		RestoreDowncount(DCNTREG);
@@ -271,8 +315,19 @@ Jit::Jit(MIPSState *mips) : blocks(mips, this), gpr(mips, &jo),fpr(mips),mips_(m
 	gpr.SetEmitter(this);
 	fpr.SetEmitter(this);
 #ifdef __wiiu__
-	// we only have a little less than 8MB RWX memory available in the HBL environment.
-	AllocCodeSpace(1024 * 1024 * 7);
+	// RWX memory in 0x00800000-0x01000000 is shared with Aroma modules; use as much as is available (max 8 MB).
+	{
+		size_t maxSz = GetMaxExecutableAllocSize() & ~(size_t)0xFFFF;
+		if (maxSz > 8 * 1024 * 1024)
+			maxSz = 8 * 1024 * 1024;
+		for (int sz = (int)maxSz; sz >= 512 * 1024; sz -= 64 * 1024) {
+			AllocCodeSpace(sz);
+			if (GetBasePtr() != nullptr) {
+				NOTICE_LOG(JIT, "JIT code space: %d bytes at %p", sz, GetBasePtr());
+				break;
+			}
+		}
+	}
 #else
 	AllocCodeSpace(1024 * 1024 * 16);
 #endif

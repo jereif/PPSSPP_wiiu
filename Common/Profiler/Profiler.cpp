@@ -57,7 +57,8 @@ static std::mutex categoriesLock;
 static int threadIdAfterLast = 0;
 static std::mutex threadsLock;
 static CategoryFrame *history;
-#if MAX_THREADS > 1
+// NOTE: Wii U builds avoid thread_local, see ThreadUtil.cpp for the reason.
+#if MAX_THREADS > 1 && !defined(__wiiu__)
 thread_local int profilerThreadId = -1;
 #else
 static int profilerThreadId = 0;

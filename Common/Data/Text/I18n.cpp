@@ -59,7 +59,8 @@ std::shared_ptr<I18NCategory> I18NRepo::GetCategory(const char *category) {
 	std::lock_guard<std::mutex> guard(catsLock_);
 	auto iter = cats_.find(category);
 	if (iter != cats_.end()) {
-		return iter->second;
+		std::shared_ptr<I18NCategory> sp = iter->second;
+		return sp;
 	} else {
 		I18NCategory *c = new I18NCategory(this, category);
 		cats_[category].reset(c);

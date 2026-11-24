@@ -233,6 +233,7 @@ namespace PpcGen
 		void NOR  (PPCReg Rs, PPCReg Ra, PPCReg Rb);
 		void XOR  (PPCReg Rs, PPCReg Ra, PPCReg Rb);
 		void XORI (PPCReg Rdest, PPCReg Ra, unsigned short imm);
+		void XORIS(PPCReg Rdest, PPCReg Ra, unsigned short imm);
 		void NEG  (PPCReg Rs, PPCReg Ra);
 		void EQV	(PPCReg a, PPCReg b, PPCReg c);
 
@@ -304,6 +305,8 @@ namespace PpcGen
 
 		// 
 		void RLWINM (PPCReg dest, PPCReg src, int shift, int start, int end);
+		void RLWIMI (PPCReg dest, PPCReg src, int shift, int start, int end);
+		void CNTLZW (PPCReg dest, PPCReg src);
 
 		void RLDICL (PPCReg Rt,	PPCReg Rs, int sh, int mb);
 
@@ -378,6 +381,7 @@ namespace PpcGen
 #endif
 		void FRSP	(PPCReg FRt, PPCReg FRb);
 		void FCTIW	(PPCReg FRt, PPCReg FRb);
+		void FCTIWZ	(PPCReg FRt, PPCReg FRb);
 		void STFIWX	(PPCReg FRt, PPCReg FRa, PPCReg FRb);
 
 		// Fpu
@@ -403,6 +407,7 @@ namespace PpcGen
 #endif
 		void FRE	(PPCReg FRt, PPCReg FRb);
 		void FRES	(PPCReg FRt, PPCReg FRb);
+		void FRSQRTE(PPCReg FRt, PPCReg FRb);
 
 		// FSEL ...
 		void FSEL	(PPCReg FRt, PPCReg FRa, PPCReg FRc, PPCReg FRb);

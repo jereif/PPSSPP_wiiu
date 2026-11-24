@@ -39,10 +39,181 @@
 #endif
 
 #ifdef __wiiu__
+#include <malloc.h>
+#include <stdarg.h>
 #include <wiiu/os/memory.h>
 #include <wiiu/mem/expandedheap.h>
-#include <malloc.h>
-static MEMExpandedHeap* rwx_heap;
+#include <wiiu/mem/frameheap.h>
+static MEMExpandedHeap *rwx_heap = nullptr;
+static bool rwx_heap_shared = false;
+
+static void WiiU_LogJit(const char *fmt, ...) {
+	char buf[512];
+	va_list va;
+	va_start(va, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
+	NOTICE_LOG(MEMMAP, "%s", buf);
+}
+
+static void InitWiiUExecutableHeap() {
+	if (rwx_heap)
+		return;
+
+	const uintptr_t rwxStart = 0x00800000;
+	const uintptr_t rwxEnd   = 0x01000000;
+
+	MEMExpandedHeap *bestExpHeap = nullptr;
+	uint32_t bestExpAvail = 0;
+	MEMFrameHeap *bestFrmHeap = nullptr;
+	uint32_t bestFrmAvail = 0;
+
+	// 1. Scan 0x00800000 - 0x01000000 for all Expanded or Frame Heaps (including inner heaps nested inside outer heaps).
+	for (uintptr_t addr = rwxStart; addr <= rwxEnd - sizeof(MEMExpandedHeap); addr += 4) {
+		MEMHeapHeader *hdr = (MEMHeapHeader *)addr;
+		if (hdr->tag == MEM_EXPANDED_HEAP_TAG) {
+			uintptr_t dStart = (uintptr_t)hdr->dataStart;
+			uintptr_t dEnd   = (uintptr_t)hdr->dataEnd;
+			if (dStart >= addr + sizeof(MEMExpandedHeap) && dStart < rwxEnd &&
+			    dEnd > dStart && dEnd <= rwxEnd) {
+				MEMExpandedHeap *exp = (MEMExpandedHeap *)hdr;
+				uint32_t avail = MEMGetAllocatableSizeForExpHeapEx(exp, 0x100);
+				uint32_t totalFree = MEMGetTotalFreeSizeForExpHeap(exp);
+				WiiU_LogJit("jit: Found RWX ExpHeap at 0x%08X (data=0x%08X..0x%08X avail=%u totalFree=%u)",
+				            (unsigned)addr, (unsigned)dStart, (unsigned)dEnd, (unsigned)avail, (unsigned)totalFree);
+				if (avail > bestExpAvail) {
+					bestExpAvail = avail;
+					bestExpHeap = exp;
+				}
+			}
+		} else if (hdr->tag == MEM_FRAME_HEAP_TAG) {
+			uintptr_t dStart = (uintptr_t)hdr->dataStart;
+			uintptr_t dEnd   = (uintptr_t)hdr->dataEnd;
+			if (dStart >= addr + sizeof(MEMFrameHeap) && dStart < rwxEnd &&
+			    dEnd > dStart && dEnd <= rwxEnd) {
+				MEMFrameHeap *frm = (MEMFrameHeap *)hdr;
+				uint32_t avail = MEMGetAllocatableSizeForFrmHeapEx(frm, 0x100);
+				WiiU_LogJit("jit: Found RWX FrmHeap at 0x%08X (data=0x%08X..0x%08X head=0x%08X tail=0x%08X avail=%u)",
+				            (unsigned)addr, (unsigned)dStart, (unsigned)dEnd,
+				            (unsigned)(uintptr_t)frm->head, (unsigned)(uintptr_t)frm->tail, (unsigned)avail);
+				if (avail > bestFrmAvail) {
+					bestFrmAvail = avail;
+					bestFrmHeap = frm;
+				}
+			}
+		}
+	}
+
+	// Diagnostic: list the biggest used blocks of the largest shared ExpHeap so we know who owns the RWX space.
+	if (bestExpHeap) {
+		uint32_t usedTotal = 0, usedCount = 0;
+		for (MEMExpandedHeapBlock *b = bestExpHeap->usedList.head; b && usedCount < 4096; b = b->next, usedCount++) {
+			usedTotal += b->blockSize;
+			if (b->blockSize >= 0x8000) {
+				const uint8_t *d = (const uint8_t *)(b + 1);
+				WiiU_LogJit("jit: used block %p size=%u attribs=%08x tag=%04x data=%02x%02x%02x%02x %.8s", (void *)b, (unsigned)b->blockSize, (unsigned)b->attribs, (unsigned)b->tag, d[0], d[1], d[2], d[3], (const char *)d + 4);
+			}
+		}
+		WiiU_LogJit("jit: ExpHeap used blocks=%u total=%u", (unsigned)usedCount, (unsigned)usedTotal);
+	}
+
+	// 2. Also scan 4 KB pages in 0x00809000..0x00FFF000 for the largest contiguous all-zero range.
+	const uintptr_t scanStart = 0x00809000;
+	const uintptr_t scanEnd   = 0x00FFF000;
+	const uintptr_t pageSize  = 0x1000;
+
+	uintptr_t bestZeroStart = 0;
+	uintptr_t bestZeroEnd   = 0;
+	uintptr_t curZeroStart  = 0;
+
+	for (uintptr_t page = scanStart; page < scanEnd; page += pageSize) {
+		const uint32_t *words = (const uint32_t *)page;
+		bool allZero = true;
+		for (size_t i = 0; i < pageSize / sizeof(uint32_t); ++i) {
+			if (words[i] != 0) {
+				allZero = false;
+				break;
+			}
+		}
+		if (allZero) {
+			if (!curZeroStart)
+				curZeroStart = page;
+			uintptr_t curZeroEnd = page + pageSize;
+			if (curZeroEnd - curZeroStart > bestZeroEnd - bestZeroStart) {
+				bestZeroStart = curZeroStart;
+				bestZeroEnd   = curZeroEnd;
+			}
+		} else {
+			curZeroStart = 0;
+		}
+	}
+
+	const uintptr_t guardBottom = 0x20000;
+	const uintptr_t guardTop    = 0x10000;
+	uint32_t zeroUsable = 0;
+	if (bestZeroEnd > bestZeroStart && (bestZeroEnd - bestZeroStart) > (guardBottom + guardTop)) {
+		zeroUsable = (uint32_t)((bestZeroEnd - bestZeroStart) - (guardBottom + guardTop));
+	}
+	uint32_t expUsable = (bestExpHeap && bestExpAvail > 128 * 1024) ? (bestExpAvail - 128 * 1024) : 0;
+	uint32_t frmUsable = (bestFrmHeap && bestFrmAvail > 128 * 1024) ? (bestFrmAvail - 128 * 1024) : 0;
+
+	WiiU_LogJit("jit: RWX candidates -> expUsable=%u frmUsable=%u zeroUsable=%u (0x%08X..0x%08X)",
+	            (unsigned)expUsable, (unsigned)frmUsable, (unsigned)zeroUsable,
+	            (unsigned)bestZeroStart, (unsigned)bestZeroEnd);
+
+	// If the all-zero range overlaps the free space of an existing Aroma ExpHeap, we must NOT just
+	// create a heap on top of it (Aroma could later allocate the same memory). Instead, properly
+	// allocate the free tail from that heap, and extend it with the unclaimed zero pages after the heap end.
+	if (bestExpHeap && expUsable >= 256 * 1024) {
+		MEMHeapHeader *hh = (MEMHeapHeader *)bestExpHeap;
+		uintptr_t hStart = (uintptr_t)hh->dataStart;
+		uintptr_t hEnd   = (uintptr_t)hh->dataEnd;
+		if (bestZeroStart < hEnd && bestZeroEnd > hStart) {
+			uint32_t sz = expUsable & ~0xFFFu;
+			void *p = MEMAllocFromExpHeapEx(bestExpHeap, sz, -0x1000);
+			if (p) {
+				uintptr_t start = (uintptr_t)p;
+				uintptr_t end = start + sz;
+				if (end == hEnd && bestZeroEnd > hEnd + guardTop) {
+					end = bestZeroEnd - guardTop;
+				}
+				rwx_heap = MEMCreateExpHeapEx(p, (uint32_t)(end - start), MEM_HEAP_FLAG_ZERO_ALLOCATED | MEM_HEAP_FLAG_USE_LOCK);
+				rwx_heap_shared = false;
+				WiiU_LogJit("jit: Claimed RWX block from Aroma ExpHeap: 0x%08X..0x%08X (%u bytes, heapEnd=0x%08X) handle=%p",
+				            (unsigned)start, (unsigned)end, (unsigned)(end - start), (unsigned)hEnd, rwx_heap);
+				if (rwx_heap)
+					return;
+			}
+		}
+	}
+
+	if (expUsable >= frmUsable && expUsable >= zeroUsable && expUsable >= 1024 * 1024) {
+		rwx_heap = bestExpHeap;
+		rwx_heap_shared = true;
+		WiiU_LogJit("jit: Using shared RWX ExpHeap at %p (avail=%u)", rwx_heap, (unsigned)bestExpAvail);
+		return;
+	}
+
+	if (frmUsable >= zeroUsable && frmUsable >= 1024 * 1024) {
+		void *subMem = MEMAllocFromFrmHeapEx(bestFrmHeap, frmUsable, -0x100);
+		if (subMem) {
+			rwx_heap = MEMCreateExpHeapEx(subMem, frmUsable, MEM_HEAP_FLAG_ZERO_ALLOCATED | MEM_HEAP_FLAG_USE_LOCK);
+			rwx_heap_shared = false;
+			WiiU_LogJit("jit: Created RWX ExpHeap inside FrmHeap at %p size=%u", subMem, (unsigned)frmUsable);
+			return;
+		}
+	}
+
+	if (zeroUsable >= 1024 * 1024) {
+		uintptr_t heapStart = bestZeroStart + guardBottom;
+		rwx_heap = MEMCreateExpHeapEx((void *)heapStart, zeroUsable, MEM_HEAP_FLAG_ZERO_ALLOCATED | MEM_HEAP_FLAG_USE_LOCK);
+		rwx_heap_shared = false;
+		WiiU_LogJit("jit: Created RWX ExpHeap at 0x%08X size=%u handle=%p",
+		            (unsigned)heapStart, (unsigned)zeroUsable, rwx_heap);
+	} else {
+		WiiU_LogJit("jit: ERROR - no suitable RWX region found!");
+	}
+}
 #endif
 
 #ifndef _WIN32
@@ -127,6 +298,17 @@ static void *SearchForFreeMem(size_t size) {
 
 // This is purposely not a full wrapper for virtualalloc/mmap, but it
 // provides exactly the primitive operations that PPSSPP needs.
+#ifdef __wiiu__
+size_t GetMaxExecutableAllocSize() {
+	if (!rwx_heap)
+		InitWiiUExecutableHeap();
+	if (!rwx_heap)
+		return 0;
+	uint32_t maxAlloc = MEMGetAllocatableSizeForExpHeapEx(rwx_heap, 0x100);
+	uint32_t reserve  = rwx_heap_shared ? (128 * 1024) : 0;
+	return maxAlloc > reserve ? (size_t)(maxAlloc - reserve) : 0;
+}
+#endif
 void *AllocateExecutableMemory(size_t size) {
 #if defined(_WIN32)
 	void *ptr = nullptr;
@@ -166,9 +348,26 @@ void *AllocateExecutableMemory(size_t size) {
 	}
 #elif defined(__wiiu__)
 	if (!rwx_heap) {
-		rwx_heap = MEMCreateExpHeapEx((u32*)0x00802000, 0x01000000 - 0x00802000, MEM_HEAP_FLAG_ZERO_ALLOCATED | MEM_HEAP_FLAG_USE_LOCK);
+		InitWiiUExecutableHeap();
 	}
-	void *ptr = MEMAllocFromExpHeapEx(rwx_heap, size, 0x100);
+	void *ptr = nullptr;
+	if (rwx_heap) {
+		uint32_t maxAlloc = MEMGetAllocatableSizeForExpHeapEx(rwx_heap, 0x100);
+		uint32_t reserve  = rwx_heap_shared ? (128 * 1024) : 0;
+		if (maxAlloc > reserve && size <= (size_t)(maxAlloc - reserve)) {
+			ptr = MEMAllocFromExpHeapEx(rwx_heap, (uint32_t)size, rwx_heap_shared ? -0x100 : 0x100);
+			if (ptr && rwx_heap_shared) {
+				memset(ptr, 0, size);
+			}
+		}
+		WiiU_LogJit("jit: AllocateExecutableMemory(%u) -> %p (maxAlloc=%u reserve=%u)",
+		            (unsigned)size, ptr, (unsigned)maxAlloc, (unsigned)reserve);
+	}
+	if (ptr) {
+		INFO_LOG(MEMMAP, "Allocated %d bytes of executable memory at %p", (int)size, ptr);
+	} else {
+		ERROR_LOG(MEMMAP, "Failed to allocate %d bytes of executable memory", (int)size);
+	}
 #else
 	static char *map_hint = 0;
 #if defined(_M_X64)
@@ -276,8 +475,9 @@ void FreeMemoryPages(void *ptr, size_t size) {
 		ERROR_LOG(MEMMAP, "FreeMemoryPages failed!\n%s", GetLastErrorMsg().c_str());
 	}
 #elif defined(__wiiu__)
-	if ((u32)ptr < 0x01000000) {
-		MEMFreeToExpHeap(rwx_heap, ptr);
+	if ((uintptr_t)ptr >= 0x00800000 && (uintptr_t)ptr < 0x01000000) {
+		if (rwx_heap)
+			MEMFreeToExpHeap(rwx_heap, ptr);
 	} else {
 		free(ptr);
 	}

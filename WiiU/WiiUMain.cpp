@@ -25,6 +25,33 @@
 const char *PROGRAM_NAME = "PPSSPP";
 const char *PROGRAM_VERSION = PPSSPP_GIT_VERSION;
 
+// The app can live either in the classic sd:/ppsspp/ directory or in the Aroma
+// homebrew app directory. Pick whichever one actually contains the assets.
+static std::string g_app_dir = "sd:/ppsspp/";
+
+static bool AppDirHasAssets(const char *dir) {
+	FILE *f = fopen((std::string(dir) + "assets/langregion.ini").c_str(), "rb");
+	if (!f)
+		return false;
+	fclose(f);
+	return true;
+}
+
+static void PickAppDir() {
+	static const char *candidates[] = {
+		"sd:/wiiu/apps/PPSSPP/",
+		"sd:/ppsspp/",
+	};
+	for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+		if (AppDirHasAssets(candidates[i])) {
+			g_app_dir = candidates[i];
+			break;
+		}
+	}
+	chdir(g_app_dir.c_str());
+}
+
+extern bool g_gx2NoLighting;
 static int g_QuitRequested;
 void System_SendMessage(const char *command, const char *parameter) {
 	if (!strcmp(command, "finish")) {
@@ -34,11 +61,38 @@ void System_SendMessage(const char *command, const char *parameter) {
 	}
 }
 
+static void BootLog(const char *msg) {
+	FILE *f = fopen("sd:/ppsspp_boot.log", "a");
+	if (f) {
+		fprintf(f, "%s\n", msg);
+		fclose(f);
+	}
+}
+
+#include <cstdarg>
+extern "C" void WiiUTrace(const char *fmt, ...) {
+	char buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	BootLog(buf);
+}
+
 int main(int argc, char **argv) {
+	BootLog("main: start");
 	PROFILE_INIT();
 	PPCSetFpIEEEMode();
 
+	PickAppDir();
+	{
+		FILE *nl_ = fopen((g_app_dir + "nolight.txt").c_str(), "rb");
+		if (nl_) { g_gx2NoLighting = true; fclose(nl_); }
+	}
+	BootLog(("main: g_app_dir=" + g_app_dir).c_str());
+
 	host = new WiiUHost();
+	BootLog("main: WiiUHost created");
 
 	std::string app_name;
 	std::string app_name_nice;
@@ -46,17 +100,26 @@ int main(int argc, char **argv) {
 	bool landscape;
 	NativeGetAppInfo(&app_name, &app_name_nice, &landscape, &version);
 
+	std::string app_path = g_app_dir + "PPSSPP.rpx";
+	// Optional: if <app dir>/autoboot.txt exists, its first line is a game path to boot directly (for testing).
+	std::string autoboot;
+	{
+		std::ifstream in(g_app_dir + "autoboot.txt");
+		if (in) {
+			std::getline(in, autoboot);
+			while (!autoboot.empty() && (autoboot.back() == '\r' || autoboot.back() == '\n' || autoboot.back() == ' '))
+				autoboot.pop_back();
+		}
+	}
 	const char *argv_[] = {
-		"sd:/ppsspp/PPSSPP.rpx",
-//		"-d",
-//		"-v",
-//		"-j",
-//		"-r",
-//		"-i",
-//		"sd:/cube.elf",
+		app_path.c_str(),
+		"--log=sd:/ppsspp.log",
+		"-v",
+		autoboot.empty() ? nullptr : autoboot.c_str(),
 		nullptr
 	};
-	NativeInit(sizeof(argv_) / sizeof(*argv_) - 1, argv_, "sd:/ppsspp/", "sd:/ppsspp/", nullptr);
+	NativeInit(autoboot.empty() ? 3 : 4, argv_, g_app_dir.c_str(), g_app_dir.c_str(), nullptr);
+	BootLog("main: NativeInit done");
 #if 0
 	UpdateScreenScale(854,480);
 #else
@@ -87,16 +150,20 @@ int main(int argc, char **argv) {
 //	g_Config.iFpsLimit = 0;
 	g_Config.bHardwareTransform = true;
 	g_Config.bSoftwareSkinning = false;
-	g_Config.bVertexCache = true;
+	g_Config.bVertexCache = false; // DIAG: off so draw traces show real vertex data
 //	PSP_CoreParameter().gpuCore = GPUCORE_NULL;
 //	g_Config.bTextureBackoffCache = true;
 	std::string error_string;
 	GraphicsContext *ctx;
-	host->InitGraphics(&error_string, &ctx);
+	bool gfxOk = host->InitGraphics(&error_string, &ctx);
+	BootLog(gfxOk ? "main: InitGraphics ok" : "main: InitGraphics FAILED");
 	NativeInitGraphics(ctx);
+	BootLog("main: NativeInitGraphics done");
 	NativeResized();
 
 	host->InitSound();
+	BootLog("main: InitSound done, entering loop");
+	bool firstFrame = true;
 	while (true) {
 		if (g_QuitRequested)
 			break;
@@ -104,7 +171,12 @@ int main(int argc, char **argv) {
 		if (!Core_IsActive())
 			UpdateUIState(UISTATE_MENU);
 		Core_Run(ctx);
+		if (firstFrame) {
+			BootLog("main: first Core_Run completed");
+			firstFrame = false;
+		}
 	}
+	BootLog("main: exited loop");
 	host->ShutdownSound();
 
 	NativeShutdownGraphics();

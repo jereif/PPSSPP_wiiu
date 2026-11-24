@@ -283,6 +283,60 @@ void Jit::GenerateFixedCode() {
 	// Go back to caller
 	BLR();
 
+	// Fast leaf helper: FPR4 = 1.0 / sqrt(FPR4) using PPC750 frsqrte + 3 double Newton-Raphson steps.
+	// Uses scratch FPR4, FPR5, FPR9, FPR10, FPR11, CR0, and R6 (via MOVI2F); preserves FPR14..31 and GPRs.
+	ppcInvSqrt = AlignCode16();
+	FMR(FPR5, FPR4);
+	FRSQRTE(FPR4, FPR4); // handles <= 0 and NaN natively; gives +0.0 for +Inf
+	MOVI2F(FPR9, 0.0f);
+	FCMPU(0, FPR5, FPR9);
+	FixupBranch invPos = B_Cond(_BGT);
+	BLR();
+	SetJumpTarget(invPos);
+	FCMPU(0, FPR4, FPR9); // skip NR if +Inf (frsqrte(+Inf) == +0.0)
+	FixupBranch invPosEst = B_Cond(_BGT);
+	BLR();
+	SetJumpTarget(invPosEst);
+	MOVI2F(FPR9, 0.5f);
+	MOVI2F(FPR10, 1.5f);
+	FMUL(FPR11, FPR5, FPR9);
+	for (int i = 0; i < 3; i++) {
+		FMUL(FPR9, FPR4, FPR4);
+		FMUL(FPR9, FPR9, FPR11);
+		FSUB(FPR9, FPR10, FPR9);
+		FMUL(FPR4, FPR4, FPR9);
+	}
+	BLR();
+
+	// Fast leaf helper: FPR4 = sqrt(FPR4) = x * invSqrt(x) for finite positive x.
+	ppcSqrt = AlignCode16();
+	FMR(FPR5, FPR4);
+	FRSQRTE(FPR4, FPR4); // QNaN if x < 0
+	MOVI2F(FPR9, 0.0f);
+	FCMPU(0, FPR5, FPR9);
+	FixupBranch sqrtPos = B_Cond(_BGT);
+	FixupBranch sqrtNeg = B_Cond(_BLT);
+	FMR(FPR4, FPR5); // +-0.0 or NaN -> preserve x
+	SetJumpTarget(sqrtNeg);
+	BLR();
+	SetJumpTarget(sqrtPos);
+	FCMPU(0, FPR4, FPR9); // skip NR if +Inf -> return +Inf
+	FixupBranch sqrtPosEst = B_Cond(_BGT);
+	FMR(FPR4, FPR5);
+	BLR();
+	SetJumpTarget(sqrtPosEst);
+	MOVI2F(FPR9, 0.5f);
+	MOVI2F(FPR10, 1.5f);
+	FMUL(FPR11, FPR5, FPR9);
+	for (int i = 0; i < 3; i++) {
+		FMUL(FPR9, FPR4, FPR4);
+		FMUL(FPR9, FPR9, FPR11);
+		FSUB(FPR9, FPR10, FPR9);
+		FMUL(FPR4, FPR4, FPR9);
+	}
+	FMUL(FPR4, FPR5, FPR4);
+	BLR();
+
 	// Don't forget to zap the instruction cache!
 	FlushIcache();
 }

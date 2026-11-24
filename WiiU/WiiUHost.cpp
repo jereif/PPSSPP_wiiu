@@ -5,6 +5,7 @@
 #include <wiiu/os/cache.h>
 #include <wiiu/os/foreground.h>
 #include <wiiu/os/debug.h>
+#include <wiiu/os/thread.h>
 #include <wiiu/ax/core.h>
 #include <wiiu/ax/multivoice.h>
 #include <wiiu/vpad.h>
@@ -20,19 +21,195 @@
 #include "WiiU/WiiUHost.h"
 #include "WiiU/GX2GraphicsContext.h"
 
-static void VPADRangeToPSPRange(VPADVec2D *vec) {
-	if (vec->x == 0.0 || vec->y == 0.0) {
+// The PSP analog stick is a square, while most physical sticks are circular.
+// Stretch the vector so that the diagonals reach the corners like on the PSP.
+static void StickRangeToSquare(float *x, float *y) {
+	if (*x == 0.0f || *y == 0.0f) {
 		return;
 	}
-	float x = fabs(vec->x);
-	float y = fabs(vec->y);
-	float phi = atanf(y / x);
-	float scale = (x > y) ? 1.0 / cosf(phi) : 1.0 / sinf(phi);
-	vec->x *= scale;
-	vec->y *= scale;
+	float ax = fabsf(*x);
+	float ay = fabsf(*y);
+	float phi = atanf(ay / ax);
+	float scale = (ax > ay) ? 1.0f / cosf(phi) : 1.0f / sinf(phi);
+	*x *= scale;
+	*y *= scale;
 }
 
-static void VPADCallback(s32 chan) {
+static void VPADRangeToPSPRange(VPADVec2D *vec) {
+	StickRangeToSquare(&vec->x, &vec->y);
+}
+
+// ---------------------------------------------------------------------------
+// Wii U Pro Controller / Classic Controller support
+//
+// The GamePad is handled through VPAD, external controllers through KPAD. Both
+// use different button bitmasks, so each controller type gets its own map.
+// ---------------------------------------------------------------------------
+
+struct PadButtonMapping {
+	u32 bit;
+	keycode_t key;
+};
+
+static const PadButtonMapping proButtonMap[] = {
+	{ WPAD_PRO_BUTTON_A,       NKCODE_BUTTON_A },
+	{ WPAD_PRO_BUTTON_B,       NKCODE_BUTTON_B },
+	{ WPAD_PRO_BUTTON_X,       NKCODE_BUTTON_X },
+	{ WPAD_PRO_BUTTON_Y,       NKCODE_BUTTON_Y },
+	{ WPAD_PRO_BUTTON_UP,      NKCODE_DPAD_UP },
+	{ WPAD_PRO_BUTTON_DOWN,    NKCODE_DPAD_DOWN },
+	{ WPAD_PRO_BUTTON_LEFT,    NKCODE_DPAD_LEFT },
+	{ WPAD_PRO_BUTTON_RIGHT,   NKCODE_DPAD_RIGHT },
+	{ WPAD_PRO_TRIGGER_L,      NKCODE_BUTTON_L1 },
+	{ WPAD_PRO_TRIGGER_R,      NKCODE_BUTTON_R1 },
+	{ WPAD_PRO_TRIGGER_ZL,     NKCODE_BUTTON_L2 },
+	{ WPAD_PRO_TRIGGER_ZR,     NKCODE_BUTTON_R2 },
+	{ WPAD_PRO_BUTTON_PLUS,    NKCODE_BUTTON_START },
+	{ WPAD_PRO_BUTTON_MINUS,   NKCODE_BUTTON_SELECT },
+	{ WPAD_PRO_BUTTON_HOME,    NKCODE_HOME },
+	{ WPAD_PRO_BUTTON_STICK_L, NKCODE_BUTTON_THUMBL },
+	{ WPAD_PRO_BUTTON_STICK_R, NKCODE_BUTTON_THUMBR },
+};
+
+// Classic Controller triggers are analog, so we turn them into two fake bits
+// that live above the real WPAD_CLASSIC_BUTTON_* values.
+#define KPAD_FAKE_L2_BIT (1u << 30)
+#define KPAD_FAKE_R2_BIT (1u << 29)
+
+static const PadButtonMapping classicButtonMap[] = {
+	{ WPAD_CLASSIC_BUTTON_A,     NKCODE_BUTTON_A },
+	{ WPAD_CLASSIC_BUTTON_B,     NKCODE_BUTTON_B },
+	{ WPAD_CLASSIC_BUTTON_X,     NKCODE_BUTTON_X },
+	{ WPAD_CLASSIC_BUTTON_Y,     NKCODE_BUTTON_Y },
+	{ WPAD_CLASSIC_BUTTON_UP,    NKCODE_DPAD_UP },
+	{ WPAD_CLASSIC_BUTTON_DOWN,  NKCODE_DPAD_DOWN },
+	{ WPAD_CLASSIC_BUTTON_LEFT,  NKCODE_DPAD_LEFT },
+	{ WPAD_CLASSIC_BUTTON_RIGHT, NKCODE_DPAD_RIGHT },
+	{ WPAD_CLASSIC_BUTTON_L,     NKCODE_BUTTON_L1 },
+	{ WPAD_CLASSIC_BUTTON_R,     NKCODE_BUTTON_R1 },
+	{ KPAD_FAKE_L2_BIT,          NKCODE_BUTTON_L2 },
+	{ KPAD_FAKE_R2_BIT,          NKCODE_BUTTON_R2 },
+	{ WPAD_CLASSIC_BUTTON_PLUS,  NKCODE_BUTTON_START },
+	{ WPAD_CLASSIC_BUTTON_MINUS, NKCODE_BUTTON_SELECT },
+	{ WPAD_CLASSIC_BUTTON_HOME,  NKCODE_HOME },
+	{ WPAD_CLASSIC_BUTTON_ZL,    NKCODE_BUTTON_THUMBL },
+	{ WPAD_CLASSIC_BUTTON_ZR,    NKCODE_BUTTON_THUMBR },
+};
+
+struct KPADPadState {
+	u32 buttons;
+	bool isClassic;
+	float lx, ly, rx, ry;
+};
+
+static KPADPadState kpadState[4];
+
+static void KPADSendKey(s32 chan, keycode_t key, bool down) {
+	NativeKey({ DEVICE_ID_PAD_0 + chan, key, down ? KEY_DOWN : KEY_UP });
+}
+
+// Releases every button that we previously reported as pressed, so that no key
+// stays stuck when a controller is disconnected or suspended.
+static void KPADReleaseAll(s32 chan, KPADPadState &state) {
+	if (!state.buttons)
+		return;
+
+	const PadButtonMapping *map = state.isClassic ? classicButtonMap : proButtonMap;
+	size_t mapCount = state.isClassic ? countof(classicButtonMap) : countof(proButtonMap);
+	for (size_t i = 0; i < mapCount; i++) {
+		if (state.buttons & map[i].bit)
+			KPADSendKey(chan, map[i].key, false);
+	}
+	state.buttons = 0;
+}
+
+static void KPADHandleChannel(s32 chan) {
+	KPADData data;
+	KPADPadState &state = kpadState[chan];
+
+	s32 count = KPADRead(chan, &data, 1);
+	bool isPro = count > 0 && data.device_type == WPAD_EXT_PRO_CONTROLLER;
+	bool isClassic = count > 0 && (data.device_type == WPAD_EXT_CLASSIC || data.device_type == WPAD_EXT_MPLUS_CLASSIC);
+
+	if (!isPro && !isClassic) {
+		// No controller (or an unsupported one) on this channel.
+		KPADReleaseAll(chan, state);
+		return;
+	}
+
+	u32 buttons;
+	float lx, ly, rx, ry;
+	const PadButtonMapping *map;
+	size_t mapCount;
+
+	if (isPro) {
+		buttons = data.pro.hold;
+		lx = data.pro.lstick_x;
+		ly = data.pro.lstick_y;
+		rx = data.pro.rstick_x;
+		ry = data.pro.rstick_y;
+		map = proButtonMap;
+		mapCount = countof(proButtonMap);
+	} else {
+		buttons = data.classic.btns_h;
+		lx = data.classic.lstick_x;
+		ly = data.classic.lstick_y;
+		rx = data.classic.rstick_x;
+		ry = data.classic.rstick_y;
+		if (data.classic.ltrigger > 0.4f)
+			buttons |= KPAD_FAKE_L2_BIT;
+		if (data.classic.rtrigger > 0.4f)
+			buttons |= KPAD_FAKE_R2_BIT;
+		map = classicButtonMap;
+		mapCount = countof(classicButtonMap);
+	}
+
+	// The controller type changed while keys were held: release the old ones.
+	if (state.isClassic != isClassic)
+		KPADReleaseAll(chan, state);
+
+	u32 pressed = buttons & ~state.buttons;
+	u32 released = state.buttons & ~buttons;
+	state.buttons = buttons;
+	state.isClassic = isClassic;
+
+	for (size_t i = 0; i < mapCount; i++) {
+		if (pressed & map[i].bit)
+			KPADSendKey(chan, map[i].key, true);
+		if (released & map[i].bit)
+			KPADSendKey(chan, map[i].key, false);
+	}
+
+	if (state.lx != lx || state.ly != ly) {
+		state.lx = lx;
+		state.ly = ly;
+		float x = lx, y = ly;
+		StickRangeToSquare(&x, &y);
+		NativeAxis({ DEVICE_ID_PAD_0 + chan, JOYSTICK_OUYA_AXIS_LS_X, x });
+		NativeAxis({ DEVICE_ID_PAD_0 + chan, JOYSTICK_OUYA_AXIS_LS_Y, y });
+	}
+	if (state.rx != rx || state.ry != ry) {
+		state.rx = rx;
+		state.ry = ry;
+		float x = rx, y = ry;
+		StickRangeToSquare(&x, &y);
+		NativeAxis({ DEVICE_ID_PAD_0 + chan, JOYSTICK_OUYA_AXIS_RS_X, x });
+		NativeAxis({ DEVICE_ID_PAD_0 + chan, JOYSTICK_OUYA_AXIS_RS_Y, y });
+	}
+
+	// ZL+ZR both pressed on an external controller also quits.
+	u32 zlBit = isClassic ? KPAD_FAKE_L2_BIT : WPAD_PRO_TRIGGER_ZL;
+	u32 zrBit = isClassic ? KPAD_FAKE_R2_BIT : WPAD_PRO_TRIGGER_ZR;
+	if ((buttons & zlBit) && (buttons & zrBit))
+		System_SendMessage("finish", "");
+}
+
+static void KPADPollAll() {
+	for (s32 chan = 0; chan < 4; chan++)
+		KPADHandleChannel(chan);
+}
+
+static void PollVPADAndKPAD(s32 chan) {
 	static keycode_t keymap[] = {
 		NKCODE_UNKNOWN,       // VPAD_BUTTON_SYNC_BIT             = 0,
 		NKCODE_HOME,          // VPAD_BUTTON_HOME_BIT             = 1,
@@ -109,15 +286,16 @@ static void VPADCallback(s32 chan) {
 			NativeAxis({ DEVICE_ID_PAD_0 + chan, JOYSTICK_OUYA_AXIS_RS_Y, vpad.rightStick.y });
 		}
 #if 1
-		if (vpad.trigger & VPAD_BUTTON_ZL) {
-			System_SendMessage("finish", "");
-		}
 		if (vpad.trigger & VPAD_BUTTON_STICK_L) {
 			extern bool g_TakeScreenshot;
 			g_TakeScreenshot = true;
 		}
 #endif
 	}
+
+	// KPAD has no sampling callback available in this runtime, so poll the
+	// external controllers from here. This runs at the GamePad sampling rate.
+	KPADPollAll();
 }
 
 static void SaveCallback(void) { OSSavesDone_ReadyToRelease(); }
@@ -128,14 +306,13 @@ WiiUHost::WiiUHost() {
 	WPADEnableURCC(true);
 	WPADEnableWiiRemote(true);
 	KPADInit();
-	VPADSetSamplingCallback(0, VPADCallback);
-
-	chdir("sd:/ppsspp/"); // probably useless...
 }
 
 WiiUHost::~WiiUHost() {
-	VPADSetSamplingCallback(0, nullptr);
-	ProcUIShutdown();
+}
+
+void WiiUHost::PollInput() {
+	PollVPADAndKPAD(0);
 }
 
 bool WiiUHost::InitGraphics(std::string *error_message, GraphicsContext **ctx) {

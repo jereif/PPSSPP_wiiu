@@ -4,9 +4,14 @@
 #include <excpt.h>
 #endif
 #define TLS_SUPPORTED
-#elif defined(__ANDROID__) || defined(__wiiu__)
+#elif defined(__ANDROID__)
 #define TLS_SUPPORTED
 #endif
+
+// NOTE: TLS is deliberately not used on Wii U. The RPX tool produced by this
+// port cannot handle the local-exec TPREL relocations that GCC emits for
+// static thread_local variables, and the information stored here is only used
+// for debug assertions anyway.
 
 #include <cstring>
 #include <cstdint>

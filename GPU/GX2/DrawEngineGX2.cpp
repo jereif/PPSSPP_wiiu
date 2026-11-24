@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include <vector>
 
 #include "Common/Profiler/Profiler.h"
 #include "Common/MemoryUtil.h"
@@ -65,8 +66,8 @@ enum {
 static const GX2AttribStream TransformedVertexElements[] = {
 	{ 0, 0, 0, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT },
 	{ 1, 0, 16, GX2_ATTRIB_FORMAT_FLOAT_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_DEFAULT },
-	{ 2, 0, 28, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_r, _g, _b, _a), GX2_ENDIAN_SWAP_8_IN_32 },
-	{ 3, 0, 32, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_r, _g, _b, _a), GX2_ENDIAN_SWAP_8_IN_32 },
+	{ 2, 0, 28, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_r, _g, _b, _a), GX2_ENDIAN_SWAP_NONE },
+	{ 3, 0, 32, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_r, _g, _b, _a), GX2_ENDIAN_SWAP_NONE },
 };
 
 DrawEngineGX2::DrawEngineGX2(Draw::DrawContext *draw, GX2ContextState *context)
@@ -155,12 +156,12 @@ static const DeclTypeInfo VComp[] = {
 	{ GX2_COMP_SEL(_x, _y, _0, _1), GX2_ENDIAN_SWAP_DEFAULT, GX2_ATTRIB_FORMAT_FLOAT_32_32 },       // DEC_FLOAT_2,
 	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_DEFAULT, GX2_ATTRIB_FORMAT_FLOAT_32_32_32 },    // DEC_FLOAT_3,
 	{ GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32 }, // DEC_FLOAT_4,
-	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_8_IN_32, GX2_ATTRIB_FORMAT_SNORM_8_8_8_8 },     // DEC_S8_3,
+	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_NONE, GX2_ATTRIB_FORMAT_SNORM_8_8_8_8 },     // DEC_S8_3,
 	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_8_IN_16, GX2_ATTRIB_FORMAT_SNORM_16_16_16_16 }, // DEC_S16_3,
 	{ GX2_COMP_SEL(_x, _0, _0, _1), GX2_ENDIAN_SWAP_DEFAULT, GX2_ATTRIB_FORMAT_UNORM_8 },           // DEC_U8_1,
-	{ GX2_COMP_SEL(_x, _y, _0, _1), GX2_ENDIAN_SWAP_8_IN_16, GX2_ATTRIB_FORMAT_UNORM_8_8 },         // DEC_U8_2,
-	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_8_IN_32, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8 },     // DEC_U8_3,
-	{ GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_8_IN_32, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8 },     // DEC_U8_4,
+	{ GX2_COMP_SEL(_x, _y, _0, _1), GX2_ENDIAN_SWAP_NONE, GX2_ATTRIB_FORMAT_UNORM_8_8 },         // DEC_U8_2,
+	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_NONE, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8 },     // DEC_U8_3,
+	{ GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_NONE, GX2_ATTRIB_FORMAT_UNORM_8_8_8_8 },     // DEC_U8_4,
 	{ GX2_COMP_SEL(_x, _0, _0, _1), GX2_ENDIAN_SWAP_8_IN_16, GX2_ATTRIB_FORMAT_UNORM_16 },          // DEC_U16_1,
 	{ GX2_COMP_SEL(_x, _y, _0, _1), GX2_ENDIAN_SWAP_8_IN_16, GX2_ATTRIB_FORMAT_UNORM_16_16 },       // DEC_U16_2,
 	{ GX2_COMP_SEL(_x, _y, _z, _1), GX2_ENDIAN_SWAP_8_IN_16, GX2_ATTRIB_FORMAT_UNORM_16_16_16_16 }, // DEC_U16_3,
@@ -252,10 +253,75 @@ void DrawEngineGX2::MarkUnreliable(VertexArrayInfoGX2 *vai) {
 	vai->ebo = nullptr;
 }
 
+extern int g_gx2FsDbg;
+static int s_snapFrame = -1;
+static int s_snapCount = 0;
+
+// Diagnostic: after a traced draw, read the center and a corner pixel of the render target.
+static void SnapPixelsAfterDraw(Draw::DrawContext *draw, FramebufferManagerGX2 *fbm, int drawNo) {
+	VirtualFramebuffer *vfb = fbm->GetCurrentRenderVFB();
+	if (!vfb || !vfb->fbo || vfb->renderWidth < 240 || vfb->renderHeight < 136)
+		return;
+	u32 c = 0, k = 0;
+	draw->CopyFramebufferToMemorySync(vfb->fbo, Draw::FB_COLOR_BIT, 240, 136, 1, 1, Draw::DataFormat::R8G8B8A8_UNORM, &c, 1, "snapd");
+	draw->CopyFramebufferToMemorySync(vfb->fbo, Draw::FB_COLOR_BIT, 4, 4, 1, 1, Draw::DataFormat::R8G8B8A8_UNORM, &k, 1, "snapd");
+	NOTICE_LOG(G3D, "GX2SNAP   after draw %d: center=%08x corner=%08x rt=%08x %dx%d fmt=%d stride=%d fbo=%p", drawNo, c, k, vfb->fb_address, vfb->renderWidth, vfb->renderHeight, (int)vfb->format, (int)vfb->fb_stride, (void *)vfb->fbo);
+}
+
 void DrawEngineGX2::BeginFrame() {
 	pushVerts_->Reset();
 	pushInds_->Reset();
 	pushUBO_->Reset();
+	if (shaderManager_) {
+		shaderManager_->DirtyLastShader();
+	}
+
+	if (gpuStats.numFlips > 0 && (gpuStats.numFlips % 300) == 180 && s_snapFrame != gpuStats.numFlips) {
+		s_snapFrame = gpuStats.numFlips;
+		s_snapCount = 0;
+		{
+			// Cycle pixel-shader diagnostic variants once the menu scene is up (frame >= 1080).
+			int mode = 0; // diagnostic cycling disabled
+			if (mode != g_gx2FsDbg) {
+				g_gx2FsDbg = mode;
+				shaderManager_->ClearShaders();
+			}
+		}
+		NOTICE_LOG(G3D, "GX2SNAP frame %d FSDBG=%d", s_snapFrame, g_gx2FsDbg);
+	}
+
+	// Diagnostic: right after a traced frame, read a few pixels back from the PSP framebuffer.
+	if (s_snapFrame >= 0 && gpuStats.numFlips == s_snapFrame + 1) {
+		VirtualFramebuffer *vfb = framebufferManager_->GetDisplayVFB();
+		if (vfb && vfb->fbo) {
+			static const int pts[5][2] = { { 4, 4 }, { 240, 136 }, { 470, 4 }, { 4, 260 }, { 470, 260 } };
+			u32 px[5] = {};
+			for (int i = 0; i < 5; i++) {
+				int x = pts[i][0] < vfb->renderWidth ? pts[i][0] : vfb->renderWidth - 1;
+				int y = pts[i][1] < vfb->renderHeight ? pts[i][1] : vfb->renderHeight - 1;
+				draw_->CopyFramebufferToMemorySync(vfb->fbo, Draw::FB_COLOR_BIT, x, y, 1, 1, Draw::DataFormat::R8G8B8A8_UNORM, &px[i], 1, "snap");
+			}
+			NOTICE_LOG(G3D, "GX2SNAP PIXELS fb=%08x %dx%d fmt=%d: (4,4)=%08x (240,136)=%08x (470,4)=%08x (4,260)=%08x (470,260)=%08x",
+				vfb->fb_address, vfb->renderWidth, vfb->renderHeight, (int)vfb->format, px[0], px[1], px[2], px[3], px[4]);
+		} else {
+			NOTICE_LOG(G3D, "GX2SNAP PIXELS: no current vfb");
+		}
+		// Full-frame dump as a coarse grid so we can see the shape of what was rendered.
+		if (vfb && vfb->fbo && vfb->renderWidth >= 480 && vfb->renderHeight >= 272) {
+			static std::vector<u32> img;
+			img.resize(480 * 272);
+			draw_->CopyFramebufferToMemorySync(vfb->fbo, Draw::FB_COLOR_BIT, 0, 0, 480, 272, Draw::DataFormat::R8G8B8A8_UNORM, img.data(), 480, "snapgrid");
+			for (int gy = 0; gy < 272; gy += 34) {
+				char line[400];
+				int n = 0;
+				for (int gx = 0; gx < 480; gx += 40) {
+					n += snprintf(line + n, sizeof(line) - n, "%08x ", img[(gy + 2) * 480 + gx + 2]);
+				}
+				NOTICE_LOG(G3D, "GX2SNAP GRID y=%3d: %s", gy + 2, line);
+			}
+		}
+		s_snapFrame = -2;
+	}
 
 	if (--decimationCounter_ <= 0) {
 		decimationCounter_ = VERTEXCACHE_DECIMATION_INTERVAL;
@@ -422,7 +488,7 @@ void DrawEngineGX2::DoFlush() {
 					_dbg_assert_msg_(gstate_c.vertBounds.minV >= gstate_c.vertBounds.maxV, "Should not have checked UVs when caching.");
 
 					// TODO: Combine these two into one buffer?
-					u32 size = dec_->GetDecVtxFmt().stride * indexGen.MaxIndex();
+					u32 size = dec_->GetDecVtxFmt().stride * (indexGen.MaxIndex() + 1);
 					vai->vbo = MEM2_alloc(size, GX2_VERTEX_BUFFER_ALIGNMENT);
 					memcpy(vai->vbo, decoded, size);
 					GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, vai->vbo, size);
@@ -505,6 +571,46 @@ void DrawEngineGX2::DoFlush() {
 		GX2VShader *vshader;
 		GX2PShader *fshader;
 		shaderManager_->GetShaders(prim, lastVType_, &vshader, &fshader, useHWTransform, useHWTessellation_);
+		g_gx2Perf.draws++;
+		if (fshader->IsFallback()) g_gx2Perf.psAllDraws++;
+		if (vshader->IsFallback()) g_gx2Perf.vsFallbackDraws++;
+		if (gpuStats.numFlips == s_snapFrame && s_snapCount < 400) {
+			s_snapCount++;
+			NOTICE_LOG(G3D, "GX2SNAP HW #%d prim=%d v=%d clr=%d bld=%d(%d,%d,%d) mask=%x sten=%d fog=%d(%08x) tex=%d(%d) vs=%08x:%08x fs=%08x:%08x",
+				s_snapCount, prim, vertexCount, gstate.isModeClear(), gstate.isAlphaBlendEnabled(),
+				gstate.getBlendFuncA(), gstate.getBlendFuncB(), gstate.getBlendEq(),
+				(u32)keys_.blend.colorWriteMask, gstate.isStencilTestEnabled(), gstate.isFogEnabled(),
+				gstate.fogcolor, gstate.isTextureMapEnabled(), gstate.getTextureFunction(),
+				vshader->ID().d[1], vshader->ID().d[0], fshader->ID().d[1], fshader->ID().d[0]);
+			{
+				const u32 *w = (const u32 *)decoded;
+				u32 stw = dec_->GetDecVtxFmt().stride / 4;
+				NOTICE_LOG(G3D, "GX2SNAP   vt=%08x tfmt=%d tex=%dx%d taddr=%08x clutfmt=%d clutaddr=%08x atest=%d depth=%d/%d wr=%d stride=%u cached=%d v0=%08x %08x %08x %08x %08x %08x v1=%08x %08x %08x %08x %08x %08x",
+					lastVType_, (int)gstate.getTextureFormat(), gstate.getTextureWidth(0), gstate.getTextureHeight(0), gstate.getTextureAddress(0),
+					(int)gstate.getClutPaletteFormat(), gstate.getClutAddress(), gstate.isAlphaTestEnabled(), gstate.isDepthTestEnabled(), (int)gstate.getDepthTestFunction(), gstate.isDepthWriteEnabled(),
+					(unsigned)stw * 4, vb_ ? 1 : 0,
+					w[0], w[1], w[2], w[3], w[4], w[5], w[stw], w[stw + 1], w[stw + 2], w[stw + 3], w[stw + 4], w[stw + 5]);
+				if (GX2Texture *gt = textureCache_ ? textureCache_->GetLastBoundTextureForDebug() : nullptr) {
+					const u32 *img = (const u32 *)gt->surface.image;
+					u32 tw = gt->surface.width, th = gt->surface.height, pitch = gt->surface.pitch;
+					if (img && gt->surface.format == GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8 && tw && th) {
+						u32 white = 0, zero = 0, total = 0;
+						for (u32 yy = 0; yy < th; yy += 2)
+							for (u32 xx = 0; xx < tw; xx += 2) {
+								u32 p = img[yy * pitch + xx];
+								total++;
+								if (p == 0xFFFFFFFF) white++;
+								if (p == 0) zero++;
+							}
+						NOTICE_LOG(G3D, "GX2SNAP   TEX %ux%u pitch=%u fmt=%d img=%p samples=%u white=%u zero=%u row0=%08x %08x %08x %08x mid=%08x %08x %08x %08x",
+							tw, th, pitch, (int)gt->surface.format, (void *)img, total, white, zero, img[0], img[1], img[2], img[3],
+							img[(th / 2) * pitch + tw / 2], img[(th / 2) * pitch + tw / 2 + 1], img[(th / 2) * pitch + tw / 2 + 2], img[(th / 2) * pitch + tw / 2 + 3]);
+					} else {
+						NOTICE_LOG(G3D, "GX2SNAP   TEX %ux%u fmt=%d (not 8888 or no image)", tw, th, (int)gt->surface.format);
+					}
+				}
+			}
+		}
 		GX2FetchShader *fetchShader = SetupFetchShaderForDraw(vshader, dec_->GetDecVtxFmt(), dec_->VertexType());
 		GX2SetPixelShader(fshader);
 		GX2SetVertexShader(vshader);
@@ -532,13 +638,15 @@ void DrawEngineGX2::DoFlush() {
 				GX2DrawEx(GX2prim[prim], vertexCount, 0, 1);
 			}
 		} else {
-			GX2SetAttribBuffer(0, vertexCount * stride, stride, vb_);
+			GX2SetAttribBuffer(0, (maxIndex + 1) * stride, stride, vb_);
 			if (useElements) {
 				GX2DrawIndexedEx(GX2prim[prim], vertexCount, GX2_INDEX_TYPE_U16, ib_, 0, 1);
 			} else {
 				GX2DrawEx(GX2prim[prim], vertexCount, 0, 1);
 			}
 		}
+		if (gpuStats.numFlips == s_snapFrame && s_snapCount <= 400)
+			SnapPixelsAfterDraw(draw_, framebufferManager_, s_snapCount);
 	} else {
 		PROFILE_THIS_SCOPE("T-soft");
 		DecodeVerts(decoded);
@@ -585,6 +693,25 @@ void DrawEngineGX2::DoFlush() {
 			GX2VShader *vshader;
 			GX2PShader *fshader;
 			shaderManager_->GetShaders(prim, lastVType_, &vshader, &fshader, false, false);
+			g_gx2Perf.draws++;
+			g_gx2Perf.swDraws++;
+			if (fshader->IsFallback()) g_gx2Perf.psAllDraws++;
+			if (gpuStats.numFlips == s_snapFrame && s_snapCount < 400) {
+				s_snapCount++;
+				NOTICE_LOG(G3D, "GX2SNAP SW #%d prim=%d v=%d clr=%d bld=%d(%d,%d,%d) mask=%x sten=%d fog=%d(%08x) tex=%d(%d) vs=%08x:%08x fs=%08x:%08x",
+					s_snapCount, prim, result.drawNumTrans, gstate.isModeClear(), gstate.isAlphaBlendEnabled(),
+					gstate.getBlendFuncA(), gstate.getBlendFuncB(), gstate.getBlendEq(),
+					(u32)keys_.blend.colorWriteMask, gstate.isStencilTestEnabled(), gstate.isFogEnabled(),
+					gstate.fogcolor, gstate.isTextureMapEnabled(), gstate.getTextureFunction(),
+					vshader->ID().d[1], vshader->ID().d[0], fshader->ID().d[1], fshader->ID().d[0]);
+				const u32 *w = (const u32 *)result.drawBuffer;
+				u32 stw = sizeof(TransformedVertex) / 4;
+				NOTICE_LOG(G3D, "GX2SNAP   SWV clrmask c=%d a=%d d=%d stride=%u indexed=%d tex=%dx%d v0=%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x v1=%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
+					gstate.isClearModeColorMask(), gstate.isClearModeAlphaMask(), gstate.isClearModeDepthMask(), (unsigned)stw * 4, result.drawIndexed ? 1 : 0,
+					gstate.getTextureWidth(0), gstate.getTextureHeight(0),
+					w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9],
+					w[stw], w[stw + 1], w[stw + 2], w[stw + 3], w[stw + 4], w[stw + 5], w[stw + 6], w[stw + 7], w[stw + 8], w[stw + 9]);
+			}
 			GX2SetPixelShader(fshader);
 			GX2SetVertexShader(vshader);
 			shaderManager_->UpdateUniforms(pushUBO_, framebufferManager_->UseBufferedRendering());
@@ -620,6 +747,8 @@ void DrawEngineGX2::DoFlush() {
 			} else {
 				GX2DrawEx(GX2prim[prim], result.drawNumTrans, 0, 1);
 			}
+			if (gpuStats.numFlips == s_snapFrame && s_snapCount <= 400)
+				SnapPixelsAfterDraw(draw_, framebufferManager_, s_snapCount);
 		} else if (result.action == SW_CLEAR) {
 			u32 clearColor = result.color;
 			float clearDepth = result.depth;
@@ -641,6 +770,10 @@ void DrawEngineGX2::DoFlush() {
 			}
 
 			u8 clearStencil = clearColor >> 24;
+			if (gpuStats.numFlips == s_snapFrame && s_snapCount < 400) {
+				s_snapCount++;
+				NOTICE_LOG(G3D, "GX2SNAP CLEAR #%d flag=%x col=%08x depth=%f sten=%02x", s_snapCount, clearFlag, clearColor, clearDepth, clearStencil);
+			}
 			draw_->Clear(clearFlag, clearColor, clearDepth, clearStencil);
 
 			if ((gstate_c.featureFlags & GPU_USE_CLEAR_RAM_HACK) && gstate.isClearModeColorMask() && (gstate.isClearModeAlphaMask() || gstate.FrameBufFormat() == GE_FORMAT_565)) {
@@ -672,10 +805,6 @@ void DrawEngineGX2::DoFlush() {
 	gstate_c.vertBounds.maxU = 0;
 	gstate_c.vertBounds.maxV = 0;
 
-	{
-		PROFILE_THIS_SCOPE("GX2Flush");
-		GX2Flush();
-	}
 #if 0
 	// We only support GPU debugging on Windows, and that's the only use case for this.
 		GPUDebug::NotifyDraw();

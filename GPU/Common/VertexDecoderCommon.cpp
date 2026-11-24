@@ -498,39 +498,42 @@ void VertexDecoder::Step_ColorInvalid() const
 
 void VertexDecoder::Step_Color565() const
 {
-	u32 *c = (u32*)(decoded_ + decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded_ + decFmt.c0off);
 	u16 cdata = *(u16_le *)(ptr_ + coloff);
-	*c = Convert5To8(cdata & 0x1f);
-	*c |= Convert6To8((cdata >> 5) & 0x3f) << 8;
-	*c |= Convert5To8((cdata >> 11) & 0x1f) << 16;
-	*c |= 255 << 24;
+	u32 col = Convert5To8(cdata & 0x1f);
+	col |= Convert6To8((cdata >> 5) & 0x3f) << 8;
+	col |= Convert5To8((cdata >> 11) & 0x1f) << 16;
+	col |= 255u << 24;
+	*c = col;
 	// Always full alpha.
 }
 
 void VertexDecoder::Step_Color5551() const
 {
-	u32 *c = (u32*)(decoded_ + decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded_ + decFmt.c0off);
 	u16 cdata = *(u16_le *)(ptr_ + coloff);
 	gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (cdata >> 15) != 0;
-	*c = Convert5To8(cdata & 0x1f);
-	*c |= Convert5To8((cdata >> 5) & 0x1f) << 8;
-	*c |= Convert5To8((cdata >> 10) & 0x1f) << 16;
-	*c |= (cdata >> 15) ? 255 << 24 : 0;
+	u32 col = Convert5To8(cdata & 0x1f);
+	col |= Convert5To8((cdata >> 5) & 0x1f) << 8;
+	col |= Convert5To8((cdata >> 10) & 0x1f) << 16;
+	col |= (cdata >> 15) ? (255u << 24) : 0;
+	*c = col;
 }
 
 void VertexDecoder::Step_Color4444() const
 {
-	u32 *c = (u32*)(decoded_ + decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded_ + decFmt.c0off);
 	u16 cdata = *(u16_le *)(ptr_ + coloff);
 	gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (cdata >> 12) == 0xF;
-	*c = 0;
+	u32 col = 0;
 	for (int j = 0; j < 4; j++)
-		*c |= Convert4To8((cdata >> (j * 4)) & 0xF) << (j * 8);
+		col |= Convert4To8((cdata >> (j * 4)) & 0xF) << (j * 8);
+	*c = col;
 }
 
 void VertexDecoder::Step_Color8888() const
 {
-	u32 *c = (u32*)(decoded_ + decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded_ + decFmt.c0off);
 	u32 cdata = *(u32_le*)(ptr_ + coloff);
 	gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (cdata >> 24) == 0xFF;
 	*c = cdata;

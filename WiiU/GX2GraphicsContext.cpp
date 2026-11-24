@@ -1,6 +1,9 @@
 
 #define GX2_COMP_SEL
 #include "WiiU/GX2GraphicsContext.h"
+#include "WiiU/WiiUHost.h"
+#include "GPU/GX2/ShaderManagerGX2.h"
+#include "Core/Host.h"
 
 #include "Core/System.h"
 #include "Common/GPU/thin3d.h"
@@ -8,8 +11,11 @@
 #include "Common/System/NativeApp.h"
 #include "Common/Input/InputState.h"
 #include "Common/Profiler/Profiler.h"
+#include "Common/TimeUtil.h"
+#include "Common/Log.h"
 
 #include <wiiu/gx2.h>
+#include <wiiu/procui.h>
 #include <wiiu/vpad.h>
 #include <wiiu/os/memory.h>
 
@@ -44,13 +50,19 @@ bool GX2GraphicsContext::Init() {
 	GX2CalcTVSize(render_mode_.mode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE, &size, &tmp);
 
 	tv_scan_buffer_ = MEMBucket_alloc(size, GX2_SCAN_BUFFER_ALIGNMENT);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tv_scan_buffer_, size);
+	if (tv_scan_buffer_) {
+		memset(tv_scan_buffer_, 0, size);
+		GX2Invalidate(GX2_INVALIDATE_MODE_CPU, tv_scan_buffer_, size);
+	}
 	GX2SetTVBuffer(tv_scan_buffer_, size, render_mode_.mode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
 
 	GX2CalcDRCSize(GX2_DRC_RENDER_MODE_SINGLE, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE, &size, &tmp);
 
 	drc_scan_buffer_ = MEMBucket_alloc(size, GX2_SCAN_BUFFER_ALIGNMENT);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drc_scan_buffer_, size);
+	if (drc_scan_buffer_) {
+		memset(drc_scan_buffer_, 0, size);
+		GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drc_scan_buffer_, size);
+	}
 	GX2SetDRCBuffer(drc_scan_buffer_, size, GX2_DRC_RENDER_MODE_SINGLE, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
 
 	color_buffer_.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
@@ -66,7 +78,13 @@ bool GX2GraphicsContext::Init() {
 	GX2InitColorBufferRegs(&color_buffer_);
 
 	color_buffer_.surface.image = MEM1_alloc(color_buffer_.surface.imageSize, color_buffer_.surface.alignment);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU, color_buffer_.surface.image, color_buffer_.surface.imageSize);
+	if (!color_buffer_.surface.image) {
+		color_buffer_.surface.image = MEM2_alloc(color_buffer_.surface.imageSize, color_buffer_.surface.alignment);
+	}
+	if (color_buffer_.surface.image) {
+		memset(color_buffer_.surface.image, 0, color_buffer_.surface.imageSize);
+		GX2Invalidate(GX2_INVALIDATE_MODE_CPU, color_buffer_.surface.image, color_buffer_.surface.imageSize);
+	}
 
 	depth_buffer_.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
 	depth_buffer_.surface.width = render_mode_.width;
@@ -81,7 +99,25 @@ bool GX2GraphicsContext::Init() {
 	GX2InitDepthBufferRegs(&depth_buffer_);
 
 	depth_buffer_.surface.image = MEM1_alloc(depth_buffer_.surface.imageSize, depth_buffer_.surface.alignment);
+	if (!depth_buffer_.surface.image) {
+		depth_buffer_.surface.image = MEM2_alloc(depth_buffer_.surface.imageSize, depth_buffer_.surface.alignment);
+	}
 	GX2Invalidate(GX2_INVALIDATE_MODE_CPU, depth_buffer_.surface.image, depth_buffer_.surface.imageSize);
+
+	{
+		FILE *f = fopen("sd:/ppsspp_boot.log", "a");
+		if (f) {
+			fprintf(f, "gx2: MEM1_avail=%u MEMBucket_avail=%u MEM2_avail=%u\n",
+				MEM1_avail(), MEMBucket_avail(), MEM2_avail());
+			fprintf(f, "gx2: tv=%p drc=%p color=%p depth=%p\n",
+				tv_scan_buffer_, drc_scan_buffer_, color_buffer_.surface.image, depth_buffer_.surface.image);
+			fprintf(f, "gx2: color %ux%u pitch=%u tile=%u size=%u align=%u\n",
+				color_buffer_.surface.width, color_buffer_.surface.height,
+				color_buffer_.surface.pitch, color_buffer_.surface.tileMode,
+				color_buffer_.surface.imageSize, color_buffer_.surface.alignment);
+			fclose(f);
+		}
+	}
 
 	ctx_state_ = (GX2ContextState *)MEM2_alloc(sizeof(GX2ContextState), GX2_CONTEXT_STATE_ALIGNMENT);
 	GX2SetupContextStateEx(ctx_state_, GX2_TRUE);
@@ -112,6 +148,7 @@ bool GX2GraphicsContext::Init() {
 void GX2GraphicsContext::Shutdown() {
 	if (!draw_)
 		return;
+	in_shutdown_ = true;
 	delete draw_;
 	draw_ = nullptr;
 	GX2ClearColor(&color_buffer_, 0.0f, 0.0f, 0.0f, 1.0f);
@@ -138,13 +175,42 @@ void GX2GraphicsContext::Shutdown() {
 
 void GX2GraphicsContext::SwapBuffers() {
 	PROFILE_THIS_SCOPE("swap");
-	GX2DrawDone();
+	static int swapCount = 0;
+	swapCount++;
+	if (host && swapCount > 1 && !in_shutdown_) {
+		static_cast<WiiUHost *>(host)->PollInput();
+	}
 	GX2CopyColorBufferToScanBuffer(&color_buffer_, GX2_SCAN_TARGET_DRC);
 	GX2CopyColorBufferToScanBuffer(&color_buffer_, GX2_SCAN_TARGET_TV);
 	GX2SwapScanBuffers();
 	GX2Flush();
-//	GX2WaitForVsync();
+	double t0 = time_now_d();
+	GX2DrawDone();
+	double t1 = time_now_d();
 	GX2WaitForFlip();
+	double t2 = time_now_d();
+	{
+		// Perf diagnostics: average frame time vs. GPU draw done vs. flip wait.
+		static double lastSwap = 0.0, accFrame = 0.0, accDraw = 0.0, accFlip = 0.0;
+		static int accCount = 0;
+		if (lastSwap != 0.0) {
+			accFrame += t2 - lastSwap;
+			accDraw += t1 - t0;
+			accFlip += t2 - t1;
+			accCount++;
+		}
+		lastSwap = t2;
+		if (accCount >= 300) {
+			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), DrawDone %.2f ms, WaitFlip %.2f ms, draws %.1f (sw %.1f, psAll %.1f, vsFB %.1f)",
+				accFrame * 1000.0 / accCount, accCount / accFrame,
+				accDraw * 1000.0 / accCount, accFlip * 1000.0 / accCount,
+				(double)g_gx2Perf.draws / accCount, (double)g_gx2Perf.swDraws / accCount,
+				(double)g_gx2Perf.psAllDraws / accCount, (double)g_gx2Perf.vsFallbackDraws / accCount);
+			accFrame = accDraw = accFlip = 0.0;
+			accCount = 0;
+			g_gx2Perf = {};
+		}
+	}
 	GX2SetContextState(ctx_state_);
 	GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
 }

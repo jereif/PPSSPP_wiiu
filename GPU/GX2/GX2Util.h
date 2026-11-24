@@ -41,8 +41,10 @@ public:
 
 	// Should be done each frame
 	void Reset() {
-		pos_ = 0;
-		push_size_ = 0;
+		EndPush();
+		if (pos_ > size_ / 2) {
+			pos_ = 0;
+		}
 	}
 
 	u8 *BeginPush(u32 *offset, u32 size) {

@@ -331,6 +331,8 @@ namespace MIPSComp
 		const u8 *breakpointBailout;
 		const u8 *crashHandler;
 
+		const u8 *ppcInvSqrt;
+		const u8 *ppcSqrt;
 	};
 	
 }	// namespace MIPSComp

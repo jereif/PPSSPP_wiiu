@@ -29,5 +29,6 @@ private:
 	void *tv_scan_buffer_;
 	GX2ColorBuffer color_buffer_ = {};
 	GX2DepthBuffer depth_buffer_ = {};
-	GX2ContextState *ctx_state_;
+	GX2ContextState *ctx_state_ = nullptr;
+	bool in_shutdown_ = false;
 };

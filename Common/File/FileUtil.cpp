@@ -207,6 +207,12 @@ bool Exists(const std::string &filename) {
 	std::string fn = filename;
 	StripTailDirSlashes(fn);
 
+#ifdef __wiiu__
+	size_t fnLen = strlen(fn.c_str());
+	if (fnLen > 0 && fn.c_str()[fnLen - 1] == ':')
+		return true;
+#endif
+
 #if defined(_WIN32)
 	std::wstring copy = ConvertUTF8ToWString(fn);
 
@@ -233,6 +239,12 @@ bool IsDirectory(const std::string &filename)
 {
 	std::string fn = filename;
 	StripTailDirSlashes(fn);
+
+#ifdef __wiiu__
+	size_t fnLen = strlen(fn.c_str());
+	if (fnLen > 0 && fn.c_str()[fnLen - 1] == ':')
+		return true;
+#endif
 
 #if defined(_WIN32)
 	std::wstring copy = ConvertUTF8ToWString(fn);
@@ -295,6 +307,11 @@ bool CreateDir(const std::string &path)
 	std::string fn = path;
 	StripTailDirSlashes(fn);
 	DEBUG_LOG(COMMON, "CreateDir('%s')", fn.c_str());
+#ifdef __wiiu__
+	size_t fnLen = strlen(fn.c_str());
+	if (fnLen > 0 && fn.c_str()[fnLen - 1] == ':')
+		return true;
+#endif
 #ifdef _WIN32
 	if (::CreateDirectory(ConvertUTF8ToWString(fn).c_str(), NULL))
 		return true;

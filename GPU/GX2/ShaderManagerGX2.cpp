@@ -40,6 +40,8 @@
 #include "GPU/Vulkan/FragmentShaderGeneratorVulkan.h"
 #include "GPU/Vulkan/VertexShaderGeneratorVulkan.h"
 
+GX2PerfCounters g_gx2Perf = {};
+
 GX2PShader::GX2PShader(FShaderID id) : GX2PixelShader(), id_(id) {
 	GenerateFragmentShaderGX2(id, this);
 	ub_id = (UB_FSID *)MEM2_alloc(sizeof(UB_FSID), GX2_UNIFORM_BLOCK_ALIGNMENT);
@@ -113,7 +115,7 @@ GX2VShader::GX2VShader(VShaderID id) : GX2VertexShader(), id_(id) {
 	ub_id->VS_BIT_HAS_COLOR_TESS = id.Bit(VS_BIT_HAS_COLOR_TESS);
 	ub_id->VS_BIT_HAS_TEXCOORD_TESS = id.Bit(VS_BIT_HAS_TEXCOORD_TESS);
 	ub_id->VS_BIT_NORM_REVERSE_TESS = id.Bit(VS_BIT_NORM_REVERSE_TESS);
-	ub_id->VS_BIT_UVGEN_MODE = id.Bit(VS_BIT_UVGEN_MODE);
+	ub_id->VS_BIT_UVGEN_MODE = id.Bits(VS_BIT_UVGEN_MODE, 2);
 	ub_id->VS_BIT_UVPROJ_MODE = id.Bits(VS_BIT_UVPROJ_MODE, 2);
 	ub_id->VS_BIT_LS0 = id.Bits(VS_BIT_LS0, 2);
 	ub_id->VS_BIT_LS1 = id.Bits(VS_BIT_LS1, 2);
@@ -199,7 +201,7 @@ void ShaderManagerGX2::DirtyLastShader() {
 	lastVSID_.set_invalid();
 	lastVShader_ = nullptr;
 	lastFShader_ = nullptr;
-	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE);
+	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_ALL_UNIFORMS);
 }
 
 uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedRendering) {
@@ -266,6 +268,7 @@ void ShaderManagerGX2::GetShaders(int prim, u32 vertType, GX2VShader **vshader, 
 	GX2VShader *vs;
 	if (vsIter == vsCache_.end()) {
 		// Vertex shader not in cache. Let's generate it.
+		NOTICE_LOG(G3D, "new VS: %s", VertexShaderDesc(VSID).c_str());
 		vs = new GX2VShader(VSID);
 		vsCache_[VSID] = vs;
 	} else {
@@ -277,6 +280,7 @@ void ShaderManagerGX2::GetShaders(int prim, u32 vertType, GX2VShader **vshader, 
 	GX2PShader *fs;
 	if (fsIter == fsCache_.end()) {
 		// Fragment shader not in cache. Let's generate it.
+		NOTICE_LOG(G3D, "new FS: %s", FragmentShaderDesc(FSID).c_str());
 		fs = new GX2PShader(FSID);
 		fsCache_[FSID] = fs;
 	} else {

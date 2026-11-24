@@ -72,7 +72,7 @@ GX2Sampler *SamplerCacheGX2::GetOrCreateSampler(const SamplerCacheKey &key) {
 TextureCacheGX2::TextureCacheGX2(Draw::DrawContext *draw) : TextureCacheCommon(draw) {
 	context_ = (GX2ContextState *)draw->GetNativeObject(Draw::NativeObject::CONTEXT);
 
-	isBgraBackend_ = true;
+	isBgraBackend_ = false;
 	lastBoundTexture = INVALID_TEX;
 
 	SetupTextureDecoder();
@@ -165,10 +165,10 @@ void TextureCacheGX2::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase
 
 void TextureCacheGX2::BindTexture(TexCacheEntry *entry) {
 	GX2Texture *texture = (GX2Texture *)entry->texturePtr;
-	if (texture != lastBoundTexture) {
-		GX2SetPixelTexture(texture, 0);
-		lastBoundTexture = texture;
-	}
+	// Always rebind: GX2 context/framebuffer switches can drop the texture binding while our cached
+	// "last bound" pointer still matches, which makes the shader sample an unbound texture.
+	GX2SetPixelTexture(texture, 0);
+	lastBoundTexture = texture;
 	int maxLevel = (entry->status & TexCacheEntry::STATUS_BAD_MIPS) ? 0 : entry->maxLevel;
 	SamplerCacheKey samplerKey = GetSamplingParams(maxLevel, entry->addr);
 	GX2Sampler *sampler = samplerCache_.GetOrCreateSampler(samplerKey);
@@ -481,6 +481,10 @@ GX2SurfaceFormat GetClutDestFormatGX2(GEPaletteFormat format) {
 }
 
 GX2SurfaceFormat TextureCacheGX2::GetDestFormat(GETextureFormat format, GEPaletteFormat clutFormat) const {
+	// The 16-bit GX2 surface formats expect big-endian data with a different channel layout than the
+	// little-endian PSP formats the decoders produce. Until that is handled, decode everything to 8888.
+	return GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+
 	if (!gstate_c.Supports(GPU_SUPPORTS_16BIT_FORMATS)) {
 		return GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
 	}
@@ -717,4 +721,8 @@ bool TextureCacheGX2::GetCurrentTextureDebug(GPUDebugBuffer &buffer, int level) 
 	}
 
 	return true;
+}
+
+GX2Texture *TextureCacheGX2::GetLastBoundTextureForDebug() const {
+	return lastBoundTexture == INVALID_TEX ? nullptr : lastBoundTexture;
 }

@@ -474,7 +474,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	VFSRegister("", new DirectoryAssetReader("/usr/share/ppsspp/assets/"));
 	VFSRegister("", new DirectoryAssetReader("/usr/share/games/ppsspp/assets/"));
 #endif
-#if PPSSPP_PLATFORM(SWITCH)
+#if PPSSPP_PLATFORM(SWITCH) || defined(__wiiu__)
 	std::string assetPath = user_data_path + "assets/";
 	VFSRegister("", new DirectoryAssetReader(assetPath.c_str()));
 #else
@@ -514,7 +514,7 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 	g_Config.flash0Directory = g_Config.internalDataDirectory + "assets/flash0/";
 #elif defined(__wiiu__)
 	g_Config.memStickDirectory = "sd:/ppsspp/";
-	g_Config.flash0Directory = "sd:/ppsspp/assets/flash0/";
+	g_Config.flash0Directory = user_data_path + "assets/flash0/";
 #elif !defined(_WIN32)
 	std::string config;
 	if (getenv("XDG_CONFIG_HOME") != NULL)
@@ -685,7 +685,6 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 			System_AskForPermission(SYSTEM_PERMISSION_STORAGE);
 		}
 	}
-
 
 	auto des = GetI18NCategory("DesktopUI");
 	// Note to translators: do not translate this/add this to PPSSPP-lang's files.

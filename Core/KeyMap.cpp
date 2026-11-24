@@ -307,8 +307,10 @@ static const DefMappingStruct defaultWiiuGamepadKeyMap[] = {
 	{CTRL_SELECT          , NKCODE_BUTTON_SELECT},
 	{CTRL_LTRIGGER        , NKCODE_BUTTON_L1},
 	{CTRL_RTRIGGER        , NKCODE_BUTTON_R1},
+	{VIRTKEY_UNTHROTTLE   , NKCODE_BUTTON_R2},
 	{VIRTKEY_UNTHROTTLE   , JOYSTICK_AXIS_RTRIGGER, +1},
 	{VIRTKEY_SPEED_TOGGLE , NKCODE_BUTTON_THUMBR},
+	{VIRTKEY_PAUSE        , NKCODE_BUTTON_L2},
 	{VIRTKEY_PAUSE        , JOYSTICK_AXIS_LTRIGGER, +1},
 	{VIRTKEY_PAUSE        , NKCODE_HOME},
 };
@@ -445,7 +447,10 @@ void SetDefaultKeyMap(DefaultMaps dmap, bool replace) {
 		SetDefaultKeyMap(DEVICE_ID_DEFAULT, defaultXperiaPlay, ARRAY_SIZE(defaultXperiaPlay), replace);
 		break;
 	case DEFAULT_MAPPING_WIIU:
-		SetDefaultKeyMap(DEVICE_ID_PAD_0, defaultWiiuGamepadKeyMap, ARRAY_SIZE(defaultWiiuGamepadKeyMap), replace);
+		// Apply to every controller slot, so that external controllers (Pro
+		// Controller, Classic Controller, ...) work without manual setup.
+		for (int i = 0; i < 4; i++)
+			SetDefaultKeyMap(DEVICE_ID_PAD_0 + i, defaultWiiuGamepadKeyMap, ARRAY_SIZE(defaultWiiuGamepadKeyMap), replace);
 		break;
 	}
 

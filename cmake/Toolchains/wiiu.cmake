@@ -12,11 +12,16 @@ if(NOT DEFINED ENV{DEVKITPRO})
 endif()
 
 
-set(CMAKE_WARN_DEPRECATED OFF)
-INCLUDE(CMakeForceCompiler)
-CMAKE_FORCE_C_COMPILER($ENV{DEVKITPPC}/bin/powerpc-eabi-gcc GNU)
-CMAKE_FORCE_CXX_COMPILER($ENV{DEVKITPPC}/bin/powerpc-eabi-g++ GNU)
-set(CMAKE_WARN_DEPRECATED ON)
+if(CMAKE_HOST_WIN32)
+   set(DK_EXE .exe)
+endif()
+set(CMAKE_C_COMPILER   $ENV{DEVKITPPC}/bin/powerpc-eabi-gcc${DK_EXE})
+set(CMAKE_CXX_COMPILER $ENV{DEVKITPPC}/bin/powerpc-eabi-g++${DK_EXE})
+set(CMAKE_ASM_COMPILER $ENV{DEVKITPPC}/bin/powerpc-eabi-gcc${DK_EXE})
+set(CMAKE_AR           $ENV{DEVKITPPC}/bin/powerpc-eabi-ar${DK_EXE})
+set(CMAKE_RANLIB       $ENV{DEVKITPPC}/bin/powerpc-eabi-ranlib${DK_EXE})
+set(CMAKE_OBJCOPY      $ENV{DEVKITPPC}/bin/powerpc-eabi-objcopy${DK_EXE})
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 SET(CMAKE_FIND_ROOT_PATH  $ENV{DEVKITPPC})
 SET(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
@@ -51,8 +56,14 @@ add_link_options(-nostartfiles -T ${WIIU_ROOT}/link.ld)
 
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${ARCH_FLAGS} -mregnames -Wa,--sectname-subst")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+# libstdc++ >= 13 emits "tw" overflow traps in shared_ptr; Cemu treats tw rA==r10 as a debugger breakpoint and hangs.
+# Dropping the (practically unreachable) traps avoids that and saves a few instructions.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \"-D__builtin_trap()=((void)0)\"")
 
-if(NOT WIIU_LIBRARIES_ADDED)
+# The toolchain file is also processed by CMake's try_compile scratch projects,
+# where the runtime sources are not available. Only create the targets when the
+# real source tree is being configured.
+if(NOT WIIU_LIBRARIES_ADDED AND EXISTS ${WIIU_ROOT}/entry.c)
 add_library(wiiu STATIC
    ${WIIU_ROOT}/missing_libc_functions.c
    ${WIIU_ROOT}/exception_handler.c
@@ -65,7 +76,6 @@ add_library(wiiu STATIC
    ${WIIU_ROOT}/gx2_validation.c
    ${WIIU_ROOT}/shader_info.c
    ${WIIU_ROOT}/stubs.S
-   ${WIIU_ROOT}/gthr-wup.cpp
    ${WIIU_ROOT}/shader_disasm.cpp
    )
 add_library(pthread STATIC ${WIIU_ROOT}/pthread.c)

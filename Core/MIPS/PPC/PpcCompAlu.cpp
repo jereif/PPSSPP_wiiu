@@ -173,7 +173,36 @@ using namespace PpcJitConstants;
 	}
 
 	void Jit::Comp_RType2(MIPSOpcode op) {
-		Comp_Generic(op);
+		CONDITIONAL_DISABLE;
+		MIPSGPReg rs = _RS;
+		MIPSGPReg rd = _RD;
+		if (rd == 0)
+			return;
+
+		switch (op & 63) {
+		case 22: // clz
+			if (gpr.IsImm(rs)) {
+				u32 val = gpr.GetImm(rs);
+				gpr.SetImm(rd, val ? __builtin_clz(val) : 32);
+			} else {
+				gpr.MapDirtyIn(rd, rs);
+				CNTLZW(gpr.R(rd), gpr.R(rs));
+			}
+			break;
+		case 23: // clo
+			if (gpr.IsImm(rs)) {
+				u32 val = ~gpr.GetImm(rs);
+				gpr.SetImm(rd, val ? __builtin_clz(val) : 32);
+			} else {
+				gpr.MapDirtyIn(rd, rs);
+				NOR(SREG, gpr.R(rs), gpr.R(rs));
+				CNTLZW(gpr.R(rd), SREG);
+			}
+			break;
+		default:
+			Comp_Generic(op);
+			break;
+		}
 	}
 
 
@@ -315,47 +344,37 @@ using namespace PpcJitConstants;
 
 
 		case 44:// R(rd) = ((s32)R(rs) > (s32)R(rt)) ? R(rs) : R(rt); break; //max
-			DISABLE;
 			if (gpr.IsImm(rs) && gpr.IsImm(rt))
 				gpr.SetImm(rd, std::max((s32)gpr.GetImm(rs), (s32)gpr.GetImm(rt)));
 			else
 			{
 				gpr.MapDirtyInIn(rd, rs, rt);
-				PpcGen::FixupBranch end;
+				PpcGen::FixupBranch useRs, end;
 
-				// by default rd = rt
-				MR(gpr.R(rd), gpr.R(rt));
-
-				// if rs > rt => end
 				CMP(gpr.R(rs), gpr.R(rt));
-				end = B_Cond(_BLE);	
-
-				// rd = rs
+				useRs = B_Cond(_BGT);
+				MR(gpr.R(rd), gpr.R(rt));
+				end = B();
+				SetJumpTarget(useRs);
 				MR(gpr.R(rd), gpr.R(rs));
-
 				SetJumpTarget(end);
 			}
 			break;
 
 		case 45: //min
-			DISABLE;
 			if (gpr.IsImm(rs) && gpr.IsImm(rt))
 				gpr.SetImm(rd, std::min((s32)gpr.GetImm(rs), (s32)gpr.GetImm(rt)));
 			else
 			{
 				gpr.MapDirtyInIn(rd, rs, rt);
-				PpcGen::FixupBranch end;
-				
-				// by default rd = rt
-				MR(gpr.R(rd), gpr.R(rt));
+				PpcGen::FixupBranch useRs, end;
 
-				// if rs < rt => end
 				CMP(gpr.R(rs), gpr.R(rt));
-				end = B_Cond(_BGE);	
-				
-				// rd = rs
+				useRs = B_Cond(_BLT);
+				MR(gpr.R(rd), gpr.R(rt));
+				end = B();
+				SetJumpTarget(useRs);
 				MR(gpr.R(rd), gpr.R(rs));
-
 				SetJumpTarget(end);
 			}
 			break;
@@ -367,15 +386,12 @@ using namespace PpcJitConstants;
 		}
 	}
 
-	/**
-	*	srl/srlv are disabled because they crash rr2
-	**/
 	void Jit::Comp_ShiftType(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
-		int rs = _RS;
-		int rd = _RD;
+		MIPSGPReg rs = _RS;
+		MIPSGPReg rd = _RD;
 		int	fd = _FD;
-		int rt = _RT;
+		MIPSGPReg rt = _RT;
 		int sa = _SA;
 
 		// noop, won't write to ZERO.
@@ -386,33 +402,56 @@ using namespace PpcJitConstants;
 		switch (op & 0x3f)
 		{
 		case 0:  //sll
-			gpr.MapDirtyIn(rd, rt);	
-			SLWI(gpr.R(rd), gpr.R(rt), sa);
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rt) << sa);
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				SLWI(gpr.R(rd), gpr.R(rt), sa);
+			}
 			break;
 
 		case 2:
-			DISABLE;
 			if (rs == 0) // srl
-			{ 
-				gpr.MapDirtyIn(rd, rt);	
-				SRWI(gpr.R(rd), gpr.R(rt), sa); 
-				//Break();
-				break;
-			} 
-			else // rotr
 			{
-				gpr.MapDirtyIn(rd, rt);	
-				ROTRWI(gpr.R(rd), gpr.R(rt), sa); 
-				Break();
+				if (gpr.IsImm(rt)) {
+					gpr.SetImm(rd, gpr.GetImm(rt) >> sa);
+				} else {
+					gpr.MapDirtyIn(rd, rt);
+					SRWI(gpr.R(rd), gpr.R(rt), sa);
+				}
+				break;
+			}
+			else if (rs == 1) // rotr
+			{
+				if (gpr.IsImm(rt)) {
+					u32 v = gpr.GetImm(rt);
+					gpr.SetImm(rd, (v >> sa) | (v << ((32 - sa) & 0x1f)));
+				} else {
+					gpr.MapDirtyIn(rd, rt);
+					ROTRWI(gpr.R(rd), gpr.R(rt), sa);
+				}
+				break;
+			}
+			else
+			{
+				Comp_Generic(op);
 				break;
 			}
 
 		case 3: //sra
-			gpr.MapDirtyIn(rd, rt);	
-			SRAWI(gpr.R(rd), gpr.R(rt), sa);
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, (u32)(((s32)gpr.GetImm(rt)) >> sa));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				SRAWI(gpr.R(rd), gpr.R(rt), sa);
+			}
 			break;
 
 		case 4: //sllv
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rt) << (gpr.GetImm(rs) & 0x1F));
+				break;
+			}
 			if (gpr.IsImm(rs))
 			{
 				int sa = gpr.GetImm(rs) & 0x1F;
@@ -425,9 +464,12 @@ using namespace PpcJitConstants;
 			SLW(gpr.R(rd), gpr.R(rt), SREG);
 			break;
 
-		case 6: 			
-			DISABLE;
-			if ( fd == 0) { //srlv				
+		case 6:
+			if (fd == 0) { //srlv
+				if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+					gpr.SetImm(rd, gpr.GetImm(rt) >> (gpr.GetImm(rs) & 0x1F));
+					break;
+				}
 				if (gpr.IsImm(rs))
 				{
 					int sa = gpr.GetImm(rs) & 0x1F;
@@ -440,7 +482,7 @@ using namespace PpcJitConstants;
 					SRW(gpr.R(rd), gpr.R(rt), SREG);
 					break;
 				}
-			} else { // rotrv
+			} else if (fd == 1) { // rotrv
 				if (gpr.IsImm(rs))
 				{
 					int sa = gpr.GetImm(rs) & 0x1F;
@@ -448,12 +490,19 @@ using namespace PpcJitConstants;
 					ROTRWI(gpr.R(rd), gpr.R(rt), sa);
 					break;
 				}
-				// Not made
-				DISABLE;
+				gpr.MapDirtyInIn(rd, rs, rt);
+				ANDI(SREG, gpr.R(rs), 0x1F);
+				ROTRW(gpr.R(rd), gpr.R(rt), SREG);
+			} else {
+				Comp_Generic(op);
 			}
 			break;
 
 		case 7: //srav
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, (u32)(((s32)gpr.GetImm(rt)) >> (gpr.GetImm(rs) & 0x1F)));
+				break;
+			}
 			if (gpr.IsImm(rs))
 			{
 				int sa = gpr.GetImm(rs) & 0x1F;
@@ -473,7 +522,33 @@ using namespace PpcJitConstants;
 	}
 
 	void Jit::Comp_Allegrex(MIPSOpcode op) {
-		Comp_Generic(op);
+		CONDITIONAL_DISABLE;
+		MIPSGPReg rt = _RT;
+		MIPSGPReg rd = _RD;
+		if (rd == 0)
+			return;
+
+		switch ((op >> 6) & 31) {
+		case 16: // seb
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, (u32)(s32)(s8)(u8)gpr.GetImm(rt));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				EXTSB(gpr.R(rd), gpr.R(rt));
+			}
+			break;
+		case 24: // seh
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, (u32)(s32)(s16)(u16)gpr.GetImm(rt));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				EXTSH(gpr.R(rd), gpr.R(rt));
+			}
+			break;
+		default:
+			Comp_Generic(op);
+			break;
+		}
 	}
 
 	void Jit::Comp_Allegrex2(MIPSOpcode op) {
@@ -484,13 +559,15 @@ using namespace PpcJitConstants;
 		CONDITIONAL_DISABLE;
 		MIPSGPReg rt = _RT;
 		MIPSGPReg rs = _RS;
-		int rd = _RD;
+		MIPSGPReg rd = _RD;
 
 		switch (op & 63) 
 		{
 		case 16: // R(rd) = HI; //mfhi
-			gpr.MapDirtyIn(rd, MIPSREG_HI);
-			MR(gpr.R(rd), gpr.R(MIPSREG_HI));
+			if (rd != 0) {
+				gpr.MapDirtyIn(rd, MIPSREG_HI);
+				MR(gpr.R(rd), gpr.R(MIPSREG_HI));
+			}
 			break; 
 
 		case 17: // HI = R(rs); //mthi
@@ -499,8 +576,10 @@ using namespace PpcJitConstants;
 			break; 
 
 		case 18: // R(rd) = LO; break; //mflo
-			gpr.MapDirtyIn(rd, MIPSREG_LO);
-			MR(gpr.R(rd), gpr.R(MIPSREG_LO));
+			if (rd != 0) {
+				gpr.MapDirtyIn(rd, MIPSREG_LO);
+				MR(gpr.R(rd), gpr.R(MIPSREG_LO));
+			}
 			break;
 
 		case 19: // LO = R(rs); break; //mtlo
@@ -535,32 +614,96 @@ using namespace PpcJitConstants;
 			break;
 
 		case 28: //madd
-			DISABLE;
 			gpr.MapDirtyDirtyInIn(MIPSREG_LO, MIPSREG_HI, rs, rt, false);
+			MULLW(SREG, gpr.R(rs), gpr.R(rt));
+			MULHW(R0, gpr.R(rs), gpr.R(rt));
+			ADDC(gpr.R(MIPSREG_LO), gpr.R(MIPSREG_LO), SREG);
+			ADDZE(gpr.R(MIPSREG_HI), gpr.R(MIPSREG_HI));
+			ADD(gpr.R(MIPSREG_HI), gpr.R(MIPSREG_HI), R0);
 			break;
 
 		case 29: //maddu
-			DISABLE;
 			gpr.MapDirtyDirtyInIn(MIPSREG_LO, MIPSREG_HI, rs, rt, false);
+			MULLW(SREG, gpr.R(rs), gpr.R(rt));
+			MULHWU(R0, gpr.R(rs), gpr.R(rt));
+			ADDC(gpr.R(MIPSREG_LO), gpr.R(MIPSREG_LO), SREG);
+			ADDZE(gpr.R(MIPSREG_HI), gpr.R(MIPSREG_HI));
+			ADD(gpr.R(MIPSREG_HI), gpr.R(MIPSREG_HI), R0);
 			break;
 
 		case 46: // msub
-			DISABLE;
 			gpr.MapDirtyDirtyInIn(MIPSREG_LO, MIPSREG_HI, rs, rt, false);
+			MULLW(SREG, gpr.R(rs), gpr.R(rt));
+			MULHW(R0, gpr.R(rs), gpr.R(rt));
+			SUBFC(gpr.R(MIPSREG_LO), SREG, gpr.R(MIPSREG_LO));
+			SUBFE(gpr.R(MIPSREG_HI), R0, gpr.R(MIPSREG_HI));
 			break;
 
 		case 47: // msubu
-			DISABLE;
 			gpr.MapDirtyDirtyInIn(MIPSREG_LO, MIPSREG_HI, rs, rt, false);
+			MULLW(SREG, gpr.R(rs), gpr.R(rt));
+			MULHWU(R0, gpr.R(rs), gpr.R(rt));
+			SUBFC(gpr.R(MIPSREG_LO), SREG, gpr.R(MIPSREG_LO));
+			SUBFE(gpr.R(MIPSREG_HI), R0, gpr.R(MIPSREG_HI));
 			break;
 
 		default:
-			DISABLE;
+			Comp_Generic(op);
+			break;
 		}
 	}
 
 	void Jit::Comp_Special3(MIPSOpcode op) {
-		Comp_Generic(op);
+		CONDITIONAL_DISABLE;
+		MIPSGPReg rs = _RS;
+		MIPSGPReg rt = _RT;
+		int pos = _POS;
+		int size = _SIZE + 1;
+		u32 mask = 0xFFFFFFFFUL >> (32 - size);
+
+		if (rt == 0)
+			return;
+
+		switch (op & 0x3f) {
+		case 0x0: // ext
+			if (pos + size > 32) {
+				Comp_Generic(op);
+				return;
+			}
+			if (gpr.IsImm(rs)) {
+				gpr.SetImm(rt, (gpr.GetImm(rs) >> pos) & mask);
+				return;
+			}
+			gpr.MapDirtyIn(rt, rs);
+			RLWINM(gpr.R(rt), gpr.R(rs), (32 - pos) & 0x1f, 32 - size, 31);
+			break;
+
+		case 0x4: // ins
+			{
+				int msb = _SIZE;
+				int actualSize = (msb - pos) + 1;
+				if (actualSize <= 0 || pos + actualSize > 32) {
+					Comp_Generic(op);
+					return;
+				}
+				u32 sourcemask = 0xFFFFFFFFUL >> (32 - actualSize);
+				u32 destmask = sourcemask << pos;
+				if (gpr.IsImm(rs)) {
+					u32 inserted = (gpr.GetImm(rs) & sourcemask) << pos;
+					if (gpr.IsImm(rt)) {
+						gpr.SetImm(rt, (gpr.GetImm(rt) & ~destmask) | inserted);
+						return;
+					}
+				}
+				gpr.MapDirtyIn(rt, rs, false);
+				RLWIMI(gpr.R(rt), gpr.R(rs), pos, 31 - msb, 31 - pos);
+			}
+			break;
+
+		default:
+			Comp_Generic(op);
+			break;
+		}
 	}
 
 }

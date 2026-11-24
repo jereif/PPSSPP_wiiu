@@ -127,6 +127,14 @@ struct UB_FSID {
 	u32_le GPU_SUPPORTS_ACCURATE_DEPTH;
 } __attribute__((aligned(64)));
 
+struct GX2PerfCounters {
+	u32 draws;
+	u32 swDraws;
+	u32 psAllDraws;
+	u32 vsFallbackDraws;
+};
+extern GX2PerfCounters g_gx2Perf;
+
 class GX2PShader : public GX2PixelShader {
 public:
 	GX2PShader(FShaderID id);
@@ -138,6 +146,8 @@ public:
 
 	const std::string source() const { return "N/A"; }
 	const u8 *bytecode() const { return program; }
+	bool IsFallback() const { return (gx2rBuffer.flags & GX2R_RESOURCE_LOCKED_READ_ONLY) != 0; }
+	const FShaderID &ID() const { return id_; }
 	std::string GetShaderString(DebugShaderStringType type) const;
 
 	UB_FSID *ub_id;
@@ -157,6 +167,8 @@ public:
 
 	const std::string source() const { return "N/A"; }
 	const u8 *bytecode() const { return program; }
+	bool IsFallback() const { return (gx2rBuffer.flags & GX2R_RESOURCE_LOCKED_READ_ONLY) != 0; }
+	const VShaderID &ID() const { return id_; }
 	std::string GetShaderString(DebugShaderStringType type) const;
 
 	UB_VSID *ub_id;

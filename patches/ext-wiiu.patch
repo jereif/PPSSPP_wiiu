@@ -1,0 +1,1355 @@
+diff --git a/entry.c b/entry.c
+index 0ffb6c1..231b1b5 100644
+--- a/entry.c
++++ b/entry.c
+@@ -1,13 +1,18 @@
+ 
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <string.h>
+ #include <fat.h>
++#include <errno.h>
++#include <sys/iosupport.h>
++#include <dirent.h>
+ #include <iosuhax.h>
+ #include <wiiu/ios.h>
+ #include <wiiu/os/thread.h>
+ #include <wiiu/os/memory.h>
+ #include <wiiu/os/debug.h>
+ #include <wiiu/os/systeminfo.h>
++#include <wiiu/procui.h>
+ #include <wiiu/sysapp.h>
+ #include <sys/socket.h>
+ 
+@@ -16,6 +21,7 @@
+ #include "exception_handler.h"
+ 
+ void wiiu_log_init(void);
++int wiiu_log_connect(const char *ip);
+ void wiiu_log_deinit(void);
+ int main(int argc, char **argv);
+ 
+@@ -91,7 +97,18 @@ static void fsdev_init(void) {
+ 		if (res >= 0) {
+ 			iosuhaxMount = 1;
+ 			fatInitDefault();
+-			return;
++			// Emulators such as Cemu may pretend the iosuhax/MCP hook opened but cannot
++			// actually mount FAT. Verify that "sd:" works, otherwise fall back to FS.
++			DIR *probe = opendir("sd:/");
++			if (probe) {
++				closedir(probe);
++				return;
++			}
++			if (mcp_hook_fd >= 0)
++				MCPHookClose();
++			else
++				IOSUHAX_Close();
++			iosuhaxMount = 0;
+ 		}
+ 	}
+ 	mount_sd_fat("sd");
+@@ -112,9 +129,18 @@ static void fsdev_exit(void) {
+ 
+ __attribute__((noreturn)) void __shutdown_program(void) {
+ 	fsdev_exit();
+-	memoryRelease();
+ 	wiiu_log_deinit();
+-	SYSRelaunchTitle(0, 0);
++	SYSLaunchMenu();
++	ProcUIStatus status;
++	while ((status = ProcUIProcessMessages(true)) != PROCUI_STATUS_EXITING) {
++		if (status == PROCUI_STATUS_RELEASE_FOREGROUND) {
++			memoryRelease();
++			ProcUIDrawDoneRelease();
++		}
++		OSSleepTicks(ms_to_ticks(16));
++	}
++	memoryRelease();
++	ProcUIShutdown();
+ 	exit(0);
+ }
+ 
+@@ -127,6 +153,33 @@ void __rpx_start(int argc, char **argv) {
+ 	memoryInitialize();
+ 	fsdev_init();
+ 
++	// Optional live log over TCP: put the PC's IP in sd:/ppsspp/logip.txt (or sd:/wiiu/apps/PPSSPP/logip.txt)
++	{
++		static const char *paths[] = { "sd:/wiiu/apps/PPSSPP/logip.txt", "sd:/ppsspp/logip.txt" };
++		for (int i = 0; i < 2; i++) {
++			FILE *lf = fopen(paths[i], "rb");
++			if (!lf)
++				continue;
++			char ip[64] = {0};
++			if (fgets(ip, sizeof(ip), lf)) {
++				char *e = ip + strlen(ip);
++				while (e > ip && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' '))
++					*--e = 0;
++				wiiu_log_connect(ip);
++			}
++			fclose(lf);
++			break;
++		}
++	}
++
++	{
++		FILE *f = fopen("sd:/ppsspp_boot.log", "w");
++		if (f) {
++			fprintf(f, "entry: fsdev_init ok (iosuhaxMount=%d, mcp_hook_fd=%d)\n", iosuhaxMount, mcp_hook_fd);
++			fclose(f);
++		}
++	}
++
+ 	DEBUG_VAR(iosuhaxMount);
+ 	DEBUG_VAR(mcp_hook_fd);
+ 	DEBUG_VAR2(MEM1_avail());
+diff --git a/exception_handler.c b/exception_handler.c
+index 2d2461c..17c2ae8 100644
+--- a/exception_handler.c
++++ b/exception_handler.c
+@@ -102,6 +102,14 @@ static void disasm_printfcallback(const char* fmt, ...)
+ static void print_and_abort()
+ {
+    DEBUG_LINE();
++   {
++      FILE *f = fopen("sd:/ppsspp_boot.log", "a");
++      if (f) {
++         fprintf(f, "\n=== EXCEPTION CAUGHT ===\n%s\n========================\n", exception_msgbuf);
++         fflush(f);
++         fclose(f);
++      }
++   }
+ //   GX2ResetGPU();
+    puts(exception_msgbuf);
+    DEBUG_STR(OSGetThreadName(OSGetCurrentThread()));
+diff --git a/imports.h b/imports.h
+index 76d3c8b..a663244 100644
+--- a/imports.h
++++ b/imports.h
+@@ -112,7 +112,9 @@ FIMPORT(MEMDestroyExpHeap)
+ FIMPORT(MEMAllocFromExpHeapEx)
+ FIMPORT(MEMFreeToExpHeap)
+ FIMPORT(MEMGetTotalFreeSizeForExpHeap)
++FIMPORT(MEMGetAllocatableSizeForExpHeapEx)
+ FIMPORT(MEMGetSizeForMBlockExpHeap)
++FIMPORT(MEMFindContainHeap)
+ FIMPORT(MEMAllocFromFrmHeapEx)
+ FIMPORT(MEMFreeToFrmHeap)
+ FIMPORT(MEMGetAllocatableSizeForFrmHeapEx)
+@@ -278,6 +280,9 @@ FIMPORT(GX2FreeTilingAperture)
+ FIMPORT_BEGIN(proc_ui)
+ FIMPORT(ProcUIInit)
+ FIMPORT(ProcUIShutdown)
++FIMPORT(ProcUIProcessMessages)
++FIMPORT(ProcUIDrawDoneRelease)
++FIMPORT(ProcUIInForeground)
+ /* sndcore2 */
+ FIMPORT_BEGIN(sndcore2)
+ FIMPORT(AXInitWithParams)
+diff --git a/include/wiiu/gx2/shader_emitter.hpp b/include/wiiu/gx2/shader_emitter.hpp
+index f043196..9ca5f7e 100644
+--- a/include/wiiu/gx2/shader_emitter.hpp
++++ b/include/wiiu/gx2/shader_emitter.hpp
+@@ -211,6 +211,7 @@ public:
+ protected:
+ 	GX2Emitter() {}
+ 	~GX2Emitter() {}
++	void FLUSH_ALU() { checkCF(Mode::CF); }
+ 	void CALL_FS(bool barrier = BARRIER) { emitCF(CF_DWORD0(0), CF_DWORD1(CF_INST::CALL_FS, barrier)); }
+ 
+ 	void END_OF_PROGRAM() {
+diff --git a/logger.c b/logger.c
+index 25272ac..03c6244 100644
+--- a/logger.c
++++ b/logger.c
+@@ -65,29 +65,40 @@ void net_print_exp(const char *str) {
+ 	OSUnlockMutex(&wiiu_log_mutex);
+ }
+ 
++int wiiu_log_connect(const char *ip) {
++	if (wiiu_log_socket >= 0 || !ip || !*ip)
++		return -1;
++	int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++	if (sock < 0)
++		return -1;
++
++	struct sockaddr_in connect_addr;
++	memset(&connect_addr, 0, sizeof(connect_addr));
++	connect_addr.sin_family = AF_INET;
++	connect_addr.sin_port = PC_DEVELOPMENT_TCP_PORT;
++	if (!inet_aton(ip, &connect_addr.sin_addr)) {
++		socketclose(sock);
++		return -1;
++	}
++
++	struct timeval timeout = {2, 0};
++	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
++	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++	if (connect(sock, (struct sockaddr *)&connect_addr, sizeof(connect_addr)) < 0) {
++		socketclose(sock);
++		return -1;
++	}
++	OSLockMutex(&wiiu_log_mutex);
++	wiiu_log_socket = sock;
++	OSUnlockMutex(&wiiu_log_mutex);
++	return 0;
++}
++
+ void wiiu_log_init(void) {
+ 	OSInitMutex(&wiiu_log_mutex);
+ #if defined(PC_DEVELOPMENT_IP_ADDRESS)
+-	if (!OSIsHLE()) {		
+-		wiiu_log_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+-
+-		if (wiiu_log_socket < 0)
+-			return;
+-
+-		struct sockaddr_in connect_addr;
+-		memset(&connect_addr, 0, sizeof(connect_addr));
+-		connect_addr.sin_family = AF_INET;
+-		connect_addr.sin_port = PC_DEVELOPMENT_TCP_PORT;
+-		inet_aton(PC_DEVELOPMENT_IP_ADDRESS, &connect_addr.sin_addr);
+-
+-		struct timeval timeout = {1, 0};
+-		setsockopt(wiiu_log_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+-		setsockopt(wiiu_log_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+-		if (connect(wiiu_log_socket, (struct sockaddr *)&connect_addr, sizeof(connect_addr)) < 0) {
+-			socketclose(wiiu_log_socket);
+-			wiiu_log_socket = -1;
+-		}
+-	}
++	if (!OSIsHLE())
++		wiiu_log_connect(PC_DEVELOPMENT_IP_ADDRESS);
+ #endif
+ 
+ 	devoptab_list[STD_OUT] = &dotab_stdout;
+diff --git a/memory.c b/memory.c
+index e0b5eaa..5859c1c 100644
+--- a/memory.c
++++ b/memory.c
+@@ -46,13 +46,17 @@ void memoryInitialize(void)
+ 
+ void memoryRelease(void)
+ {
+-    MEMDestroyExpHeap(mem1_heap);
+-    MEMFreeToFrmHeap(MEMGetBaseHeapHandle(MEM_BASE_HEAP_MEM1), MEM_FRAME_HEAP_FREE_ALL);
+-    mem1_heap = NULL;
+-
+-    MEMDestroyExpHeap(bucket_heap);
+-    MEMFreeToFrmHeap(MEMGetBaseHeapHandle(MEM_BASE_HEAP_FG), MEM_FRAME_HEAP_FREE_ALL);
+-    bucket_heap = NULL;
++    if (mem1_heap) {
++        MEMDestroyExpHeap(mem1_heap);
++        MEMFreeToFrmHeap(MEMGetBaseHeapHandle(MEM_BASE_HEAP_MEM1), MEM_FRAME_HEAP_FREE_ALL);
++        mem1_heap = NULL;
++    }
++
++    if (bucket_heap) {
++        MEMDestroyExpHeap(bucket_heap);
++        MEMFreeToFrmHeap(MEMGetBaseHeapHandle(MEM_BASE_HEAP_FG), MEM_FRAME_HEAP_FREE_ALL);
++        bucket_heap = NULL;
++    }
+ }
+ 
+ u32 MEM2_avail() { return MEMGetTotalFreeSizeForExpHeap(MEMGetBaseHeapHandle(MEM_BASE_HEAP_MEM2)); }
+@@ -138,7 +142,7 @@ void * MEM1_alloc(unsigned int size, unsigned int align)
+ 
+ void MEM1_free(void *ptr)
+ {
+-   if (ptr)
++   if (ptr && mem1_heap)
+       MEMFreeToExpHeap(mem1_heap, ptr);
+ }
+ 
+@@ -151,6 +155,6 @@ void * MEMBucket_alloc(unsigned int size, unsigned int align)
+ 
+ void MEMBucket_free(void *ptr)
+ {
+-   if (ptr)
++   if (ptr && bucket_heap)
+       MEMFreeToExpHeap(bucket_heap, ptr);
+ }
+diff --git a/pthread.c b/pthread.c
+index c2ebc63..2dae4d6 100644
+--- a/pthread.c
++++ b/pthread.c
+@@ -1,168 +1,965 @@
++/* pthread implementation for devkitPPC / Wii U (coreinit based).
++ *
++ * The original version of this file targeted the 2018 newlib, where the
++ * pthread types were plain pointers. Current devkitPPC uses the standard
++ * POSIX types (structs wrapping _LOCK_T/_COND_T), and libstdc++ is built
++ * with the posix gthread model, so it calls pthread_* directly. The types
++ * below are therefore opaque storage slots that hold a pointer to a
++ * coreinit object (plus extra state where needed).
++ */
+ 
+ #include <errno.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <malloc.h>
+ #include <string.h>
++#include <time.h>
++#include <sched.h>
+ #include <pthread.h>
++#include <sys/lock.h>
+ 
++#include <wiiu/os/alarm.h>
++#include <wiiu/os/atomic.h>
++#include <wiiu/os/condition.h>
+ #include <wiiu/os/debug.h>
+-#include <wiiu/os/thread.h>
+ #include <wiiu/os/mutex.h>
+-#include <wiiu/os/condition.h>
+-#include <wiiu/os/atomic.h>
++#include <wiiu/os/thread.h>
++#include <wiiu/os/time.h>
++
++#define WUP_DEFAULT_STACK_SIZE (2 * 1024 * 1024)
++
++/* ------------------------------------------------------------------ */
++/* Type storage helpers                                               */
++/* ------------------------------------------------------------------ */
++
++/* Prebuilt libraries (such as ffmpeg/wiiu/lib/libav*.a) were compiled against
++ * an older newlib where pthread_mutex_t, pthread_cond_t, and pthread_rwlock_t
++ * were 4-byte pointers, whereas current devkitPPC newlib defines them as
++ * multi-word structs. To remain binary-compatible with both, we only read and
++ * write the first 32-bit word (offset 0) of each synchronization object. */
++_Static_assert(sizeof(pthread_mutex_t) >= sizeof(uint32_t), "pthread_mutex_t too small");
++_Static_assert(sizeof(pthread_cond_t) >= sizeof(uint32_t), "pthread_cond_t too small");
++
++typedef struct
++{
++   OSMutex mutex;
++   OSThread *owner;
++   int32_t count;
++   int recursive;
++} wup_mutex_impl;
+ 
+-pthread_t pthread_self (void)
++typedef struct
++{
++   OSCondition cond;
++   clockid_t clock_id;
++} wup_cond_impl;
++
++static inline int is_valid_handle(uint32_t val)
++{
++   return val >= 0x01000000u && val != 0xFFFFFFFFu;
++}
++
++/* Lazily create (and race-safely publish) a pointer sized object. */
++static void *publish_swap(uint32_t *slot, void *candidate)
++{
++   uint32_t old = 0;
++   if (OSCompareAndSwapAtomicEx(slot, 0, (uint32_t)(uintptr_t)candidate, &old))
++      return candidate;
++   free(candidate);
++   return (void *)(uintptr_t)old;
++}
++
++static wup_mutex_impl *mutex_impl(pthread_mutex_t *mutex, int create)
++{
++   uint32_t *slot = (uint32_t *)mutex;
++   uint32_t val = *slot;
++   if (is_valid_handle(val))
++      return (wup_mutex_impl *)(uintptr_t)val;
++   if (!create)
++      return NULL;
++
++   wup_mutex_impl *impl = (wup_mutex_impl *)calloc(1, sizeof(wup_mutex_impl));
++   if (!impl)
++      return NULL;
++   OSInitMutex(&impl->mutex);
++   impl->recursive = (val == PTHREAD_MUTEX_RECURSIVE);
++
++   uint32_t old = 0;
++   if (OSCompareAndSwapAtomicEx(slot, val, (uint32_t)(uintptr_t)impl, &old))
++      return impl;
++   free(impl);
++   return is_valid_handle(old) ? (wup_mutex_impl *)(uintptr_t)old : NULL;
++}
++
++static wup_cond_impl *cond_impl(pthread_cond_t *cond, int create)
++{
++   uint32_t *slot = (uint32_t *)cond;
++   uint32_t val = *slot;
++   if (is_valid_handle(val))
++      return (wup_cond_impl *)(uintptr_t)val;
++   if (!create)
++      return NULL;
++
++   wup_cond_impl *impl = (wup_cond_impl *)calloc(1, sizeof(wup_cond_impl));
++   if (!impl)
++      return NULL;
++   OSInitCond(&impl->cond);
++   impl->clock_id = (val == 0xFFFFFFFFu) ? CLOCK_REALTIME : (clockid_t)val;
++
++   uint32_t old = 0;
++   if (OSCompareAndSwapAtomicEx(slot, val, (uint32_t)(uintptr_t)impl, &old))
++      return impl;
++   free(impl);
++   return is_valid_handle(old) ? (wup_cond_impl *)(uintptr_t)old : NULL;
++}
++
++/* ------------------------------------------------------------------ */
++/* Threads                                                            */
++/* ------------------------------------------------------------------ */
++
++typedef struct __pthread_t
++{
++   OSThread thread;
++   void *(*start_routine)(void *);
++   void *arg;
++   void *retval;
++   void *stack;
++   int detached;
++} wup_thread;
++
++/* The OS entry point signature is int(*)(int, char **); we pass the wup_thread
++ * pointer directly in the argv parameter (register r4) so OSCreateThread's
++ * initial stack frame setup cannot overwrite it. */
++static int thread_entry(int argc, char **argv)
++{
++   (void)argc;
++   wup_thread *self = (wup_thread *)argv;
++   self->retval = self->start_routine(self->arg);
++   return 0;
++}
++
++static void thread_deallocator(OSThread *thread, void *stack)
++{
++   wup_thread *self = (wup_thread *)thread;
++   (void)stack;
++   free(self->stack);
++   free(self);
++}
++
++pthread_t pthread_self(void)
+ {
+    return (pthread_t)OSGetCurrentThread();
+ }
+ 
+-int pthread_setname_np (pthread_t target_thread, const char *name) {
+-   OSSetThreadName((OSThread*)target_thread, name);
++int pthread_setname_np(pthread_t target_thread, const char *name)
++{
++   OSSetThreadName((OSThread *)target_thread, name);
++   return 0;
+ }
+ 
+-int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
+-   OSInitMutex((OSMutex *)(*mutex = (pthread_mutex_t)calloc(1, sizeof(OSMutex))));
++int pthread_equal(pthread_t t1, pthread_t t2)
++{
++   return t1 == t2;
++}
++
++int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
++                   void *(*start_routine)(void *), void *arg)
++{
++   if (!thread || !start_routine)
++      return EINVAL;
++
++   wup_thread *self = (wup_thread *)calloc(1, sizeof(wup_thread));
++   if (!self)
++      return ENOMEM;
++
++   size_t stack_size = WUP_DEFAULT_STACK_SIZE;
++   void *stack_addr = NULL;
++   if (attr && attr->stacksize > 0)
++      stack_size = (size_t)attr->stacksize;
++   if (attr && attr->stackaddr)
++      stack_addr = attr->stackaddr;
++
++   if (stack_addr)
++      self->stack = NULL;
++   else
++   {
++      self->stack = memalign(16, stack_size);
++      if (!self->stack)
++      {
++         free(self);
++         return ENOMEM;
++      }
++      stack_addr = self->stack;
++   }
++
++   self->start_routine = start_routine;
++   self->arg = arg;
++
++   OSThreadAttributes os_attr = OS_THREAD_ATTRIB_AFFINITY_ANY;
++   if (attr && attr->detachstate == PTHREAD_CREATE_DETACHED)
++   {
++      os_attr |= OS_THREAD_ATTRIB_DETACHED;
++      self->detached = 1;
++   }
++
++   if (!OSCreateThread(&self->thread, (OSThreadEntryPointFn)thread_entry, 0, (char **)self,
++                       (uint8_t *)stack_addr + stack_size, (uint32_t)stack_size,
++                       OS_THREAD_DEF_PRIO, os_attr))
++   {
++      free(self->stack);
++      free(self);
++      return EAGAIN;
++   }
++
++   if (self->detached)
++      OSSetThreadDeallocator(&self->thread, thread_deallocator);
++
++   *thread = (pthread_t)&self->thread;
++   OSResumeThread(&self->thread);
++   return 0;
++}
++
++int pthread_join(pthread_t thread, void **value_ptr)
++{
++   wup_thread *self = (wup_thread *)thread;
++   int result = 0;
++
++   if (!thread)
++      return ESRCH;
++
++   if (!OSJoinThread(&self->thread, &result))
++      return EINVAL;
++
++   if (value_ptr)
++      *value_ptr = self->retval;
++
++   free(self->stack);
++   free(self);
++
+    return 0;
+ }
+ 
+-static void check_mutex(pthread_mutex_t *mutex) {
+-   if (*mutex == _PTHREAD_MUTEX_INITIALIZER)
+-      pthread_mutex_init(mutex, NULL);
++int pthread_detach(pthread_t thread)
++{
++   wup_thread *self = (wup_thread *)thread;
++   if (!thread)
++      return ESRCH;
++
++   if (!self->detached)
++   {
++      self->detached = 1;
++      OSSetThreadDeallocator(&self->thread, thread_deallocator);
++   }
++   OSDetachThread(&self->thread);
++   return 0;
+ }
+ 
+-int pthread_mutex_destroy(pthread_mutex_t *mutex) {
+-   if (*mutex != _PTHREAD_MUTEX_INITIALIZER)
+-      free((OSMutex *)*mutex);
+-   *mutex = 0;
++void pthread_exit(void *value_ptr)
++{
++   (void)value_ptr;
++   OSExitThread(0);
++}
++
++int sched_yield(void)
++{
++   OSYieldThread();
+    return 0;
+ }
+ 
+-int pthread_mutex_lock(pthread_mutex_t *mutex) {
+-   check_mutex(mutex);
+-   OSLockMutex((OSMutex *)*mutex);
++/* ------------------------------------------------------------------ */
++/* Attributes                                                         */
++/* ------------------------------------------------------------------ */
++
++int pthread_attr_init(pthread_attr_t *attr)
++{
++   memset(attr, 0, sizeof(*attr));
++   attr->stacksize = WUP_DEFAULT_STACK_SIZE;
++   attr->detachstate = PTHREAD_CREATE_JOINABLE;
+    return 0;
+ }
+ 
+-int pthread_mutex_unlock(pthread_mutex_t *mutex) {
+-   check_mutex(mutex);
+-   OSUnlockMutex((OSMutex *)*mutex);
++int pthread_attr_destroy(pthread_attr_t *attr)
++{
++   (void)attr;
+    return 0;
+ }
+-int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
+-   OSInitCond((OSCondition *)(*cond = (pthread_cond_t)malloc(sizeof(OSCondition))));
++
++int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
++{
++   attr->stacksize = (int)stacksize;
+    return 0;
+ }
+-int pthread_cond_destroy(pthread_cond_t *cond) {
+-   free((void *)*cond);
+-   *cond = 0;
++
++int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
++{
++   *stacksize = (size_t)attr->stacksize;
+    return 0;
+ }
+ 
+-int pthread_cond_signal(pthread_cond_t *cond) {
+-   // OSSignalCond is actually a broadcast,
+-   // this is fine tough because pthread allows that.
+-   OSSignalCond((OSCondition *)*cond);
++int pthread_attr_setstackaddr(pthread_attr_t *attr, void *stackaddr)
++{
++   attr->stackaddr = stackaddr;
+    return 0;
+ }
+-int pthread_cond_broadcast(pthread_cond_t *cond) {
+-   OSSignalCond((OSCondition *)*cond);
++
++int pthread_attr_getstackaddr(const pthread_attr_t *attr, void **stackaddr)
++{
++   *stackaddr = attr->stackaddr;
+    return 0;
+ }
+-int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+-   OSWaitCond((OSCondition *)*cond, (OSMutex *)*mutex);
++
++int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate)
++{
++   attr->detachstate = detachstate;
+    return 0;
+ }
+ 
+-int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
+-   if (!OSTestAndSetAtomic((u32*)&once_control->is_initialized, 1)) {
+-      init_routine();
+-      once_control->init_executed = 1;
++int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate)
++{
++   *detachstate = attr->detachstate;
++   return 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* Mutexes                                                            */
++/* ------------------------------------------------------------------ */
++
++int pthread_mutexattr_init(pthread_mutexattr_t *attr)
++{
++   memset(attr, 0, sizeof(*attr));
++   attr->type = PTHREAD_MUTEX_NORMAL;
++   return 0;
++}
++
++int pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
++{
++   (void)attr;
++   return 0;
++}
++
++int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
++{
++   attr->type = type;
++   return 0;
++}
++
++int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type)
++{
++   *type = attr->type;
++   return 0;
++}
++
++int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
++{
++   if (!mutex)
++      return EINVAL;
++
++   wup_mutex_impl *impl = (wup_mutex_impl *)calloc(1, sizeof(wup_mutex_impl));
++   if (!impl)
++      return ENOMEM;
++
++   OSInitMutex(&impl->mutex);
++   impl->recursive = (attr && attr->type == PTHREAD_MUTEX_RECURSIVE);
++   *(uint32_t *)mutex = (uint32_t)(uintptr_t)impl;
++
++   return 0;
++}
++
++int pthread_mutex_destroy(pthread_mutex_t *mutex)
++{
++   if (!mutex)
++      return EINVAL;
++
++   wup_mutex_impl *impl = mutex_impl(mutex, 0);
++   if (impl)
++      free(impl);
++   *(uint32_t *)mutex = 0;
++
++   return 0;
++}
++
++int pthread_mutex_lock(pthread_mutex_t *mutex)
++{
++   wup_mutex_impl *impl = mutex_impl(mutex, 1);
++   if (!impl)
++      return ENOMEM;
++
++   if (impl->recursive)
++   {
++      OSThread *self = OSGetCurrentThread();
++      if (impl->owner == self)
++      {
++         impl->count++;
++         return 0;
++      }
++      OSLockMutex(&impl->mutex);
++      impl->owner = self;
++      impl->count = 1;
++      return 0;
+    }
+-   while (!once_control->init_executed)
+-      OSYieldThread();
++
++   OSLockMutex(&impl->mutex);
+    return 0;
+ }
+ 
+-int pthread_join(pthread_t pthread, void **value_ptr) {
+-   return !OSJoinThread((OSThread *)pthread, (int *)value_ptr);
++int pthread_mutex_unlock(pthread_mutex_t *mutex)
++{
++   wup_mutex_impl *impl = mutex_impl(mutex, 0);
++   if (!impl)
++      return EPERM;
++
++   if (impl->recursive)
++   {
++      OSThread *self = OSGetCurrentThread();
++      if (impl->owner != self)
++         return EPERM;
++      if (--impl->count == 0)
++      {
++         impl->owner = NULL;
++         OSUnlockMutex(&impl->mutex);
++      }
++      return 0;
++   }
++
++   OSUnlockMutex(&impl->mutex);
++   return 0;
+ }
+ 
+-static void thread_deallocator(OSThread *thread, void *stack) {
+-   free(stack);
+-   free(thread);
++int pthread_mutex_trylock(pthread_mutex_t *mutex)
++{
++   wup_mutex_impl *impl = mutex_impl(mutex, 1);
++   if (!impl)
++      return ENOMEM;
++
++   if (impl->recursive && impl->owner == OSGetCurrentThread())
++   {
++      impl->count++;
++      return 0;
++   }
++
++   if (!OSTryLockMutex(&impl->mutex))
++      return EBUSY;
++
++   if (impl->recursive)
++   {
++      impl->owner = OSGetCurrentThread();
++      impl->count = 1;
++   }
++
++   return 0;
+ }
+ 
+-int pthread_create(pthread_t *pthread, const pthread_attr_t *pthread_attr, void *(*start_routine)(void *), void *arg) {
+-   OSThread *thread = calloc(1, sizeof(OSThread));
++static void timespec_to_ticks(const struct timespec *ts, OSTime *ticks)
++{
++   *ticks = (OSTime)sec_to_ticks((uint64_t)ts->tv_sec) + (OSTime)ns_to_ticks((uint64_t)ts->tv_nsec);
++}
+ 
+-   int stack_size = 4 * 1024 * 1024;
+-   if (pthread_attr && pthread_attr->stacksize)
+-      stack_size = pthread_attr->stacksize;
++int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime)
++{
++   for (;;)
++   {
++      int ret = pthread_mutex_trylock(mutex);
++      if (ret != EBUSY)
++         return ret;
+ 
+-   void *stack_addr = NULL;
+-   if (pthread_attr && pthread_attr->stackaddr)
+-      stack_addr = (u8 *)pthread_attr->stackaddr + pthread_attr->stacksize;
+-   else
+-      stack_addr = (u8 *)memalign(8, stack_size) + stack_size;
++      struct timespec now;
++      if (clock_gettime(CLOCK_REALTIME, &now) != 0)
++         return EINVAL;
++      if (now.tv_sec > abstime->tv_sec ||
++          (now.tv_sec == abstime->tv_sec && now.tv_nsec >= abstime->tv_nsec))
++         return ETIMEDOUT;
++
++      OSSleepTicks(ms_to_ticks(1));
++   }
++}
+ 
+-   OSThreadAttributes attr = OS_THREAD_ATTRIB_AFFINITY_ANY;
+-      attr = OS_THREAD_ATTRIB_AFFINITY_CPU0 | OS_THREAD_ATTRIB_AFFINITY_CPU2;
+-   if (pthread_attr && pthread_attr->detachstate)
+-      attr |= OS_THREAD_ATTRIB_DETACHED;
++/* ------------------------------------------------------------------ */
++/* Condition variables                                                */
++/* ------------------------------------------------------------------ */
+ 
+-   if (!OSCreateThread(thread, (OSThreadEntryPointFn)start_routine, (int)arg, NULL, stack_addr, stack_size, OS_THREAD_DEF_PRIO, attr))
++int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr)
++{
++   if (!cond)
+       return EINVAL;
+ 
+-   OSSetThreadDeallocator(thread, thread_deallocator);
+-   *pthread = (pthread_t)thread;
+-   OSResumeThread(thread);
++   wup_cond_impl *impl = (wup_cond_impl *)calloc(1, sizeof(wup_cond_impl));
++   if (!impl)
++      return ENOMEM;
++
++   OSInitCond(&impl->cond);
++   impl->clock_id = attr ? attr->clock_id : CLOCK_REALTIME;
++   *(uint32_t *)cond = (uint32_t)(uintptr_t)impl;
+ 
+    return 0;
+ }
+-#if 0 // unused
+-//#define _POSIX_TIMEOUTS 1
+-//#define _POSIX_SPIN_LOCKS
+-//#define _UNIX98_THREAD_MUTEX_ATTRIBUTES 1
+-int pthread_mutex_trylock(pthread_mutex_t *mutex) {
+-   check_mutex(mutex);
+-   OSTryLockMutex((OSMutex *)*mutex);
++
++int pthread_cond_destroy(pthread_cond_t *cond)
++{
++   if (!cond)
++      return EINVAL;
++
++   wup_cond_impl *impl = cond_impl(cond, 0);
++   if (impl)
++      free(impl);
++   *(uint32_t *)cond = 0;
++
+    return 0;
+ }
+ 
+-int pthread_mutexattr_init(pthread_mutexattr_t *attr) {
+-   attr->is_initialized = true;
+-   attr->recursive = true;
+-#ifdef _UNIX98_THREAD_MUTEX_ATTRIBUTES
+-   attr->type = PTHREAD_MUTEX_NORMAL;
+-#endif
++int pthread_cond_signal(pthread_cond_t *cond)
++{
++   wup_cond_impl *impl = cond_impl(cond, 1);
++   if (!impl)
++      return 0;
++   /* coreinit's OSSignalCond wakes every waiter, which POSIX also allows
++    * for signal (spurious wakeups are permitted). */
++   OSSignalCond(&impl->cond);
+    return 0;
+ }
+ 
+-int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) {
+-   memset(attr, 0x00, sizeof(attr));
++int pthread_cond_broadcast(pthread_cond_t *cond)
++{
++   return pthread_cond_signal(cond);
++}
++
++int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
++{
++   wup_cond_impl *cimpl = cond_impl(cond, 1);
++   wup_mutex_impl *mimpl = mutex_impl(mutex, 1);
++
++   if (!cimpl || !mimpl)
++      return ENOMEM;
++
++   OSWaitCond(&cimpl->cond, &mimpl->mutex);
+    return 0;
+ }
+ 
+-int pthread_mutexattr_getpshared(_CONST pthread_mutexattr_t *attr, int *pshared);
+-int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int pshared);
++int pthread_condattr_init(pthread_condattr_t *attr)
++{
++   memset(attr, 0, sizeof(*attr));
++   attr->clock_id = CLOCK_REALTIME;
++   return 0;
++}
+ 
+-int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, _CONST struct timespec *abstime) {
+-   OSWaitCond((OSCondition*)*cond, (OSMutex*)*mutex);
++int pthread_condattr_destroy(pthread_condattr_t *attr)
++{
++   (void)attr;
+    return 0;
+ }
+ 
+-int pthread_detach(pthread_t pthread) {
+-   OSDetachThread((OSThread *)pthread);
++int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clock_id)
++{
++   attr->clock_id = clock_id;
+    return 0;
+ }
+-#ifdef _UNIX98_THREAD_MUTEX_ATTRIBUTES
+-int pthread_mutexattr_gettype(_CONST pthread_mutexattr_t *attr, int *kind) {
+-   *kind = attr->type;
++
++int pthread_condattr_getclock(const pthread_condattr_t *attr, clockid_t *clock_id)
++{
++   *clock_id = attr->clock_id;
+    return 0;
+ }
+-int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int kind) {
+-   attr->type = kind;
++
++typedef struct
++{
++   OSCondition *cond;
++   volatile int timed_out;
++} wup_timeout_data;
++
++static void timeout_alarm_callback(OSAlarm *alarm, OSContext *context)
++{
++   wup_timeout_data *data = (wup_timeout_data *)OSGetAlarmUserData(alarm);
++   (void)context;
++   data->timed_out = 1;
++   OSSignalCond(data->cond);
++}
++
++int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
++                           const struct timespec *abstime)
++{
++   wup_cond_impl *cimpl = cond_impl(cond, 1);
++   wup_mutex_impl *mimpl = mutex_impl(mutex, 1);
++
++   if (!cimpl || !mimpl)
++      return ENOMEM;
++
++   /* Only CLOCK_REALTIME deadlines can be evaluated here; anything else
++    * degrades to a normal wait. */
++   if (cimpl->clock_id != CLOCK_REALTIME)
++   {
++      OSWaitCond(&cimpl->cond, &mimpl->mutex);
++      return 0;
++   }
++
++   struct timespec now;
++   if (clock_gettime(CLOCK_REALTIME, &now) != 0)
++      memset(&now, 0, sizeof(now));
++
++   int64_t remaining_ns = ((int64_t)abstime->tv_sec - (int64_t)now.tv_sec) * 1000000000LL +
++                          ((int64_t)abstime->tv_nsec - (int64_t)now.tv_nsec);
++
++   if (remaining_ns <= 0)
++      return ETIMEDOUT;
++
++   wup_timeout_data data;
++   data.cond = &cimpl->cond;
++   data.timed_out = 0;
++
++   OSAlarm alarm;
++   OSCreateAlarm(&alarm);
++   OSSetAlarmUserData(&alarm, &data);
++   OSSetAlarm(&alarm, (OSTime)ns_to_ticks((uint64_t)remaining_ns), timeout_alarm_callback);
++
++   OSWaitCond(&cimpl->cond, &mimpl->mutex);
++
++   OSCancelAlarm(&alarm);
++
++   return data.timed_out ? ETIMEDOUT : 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* Once                                                               */
++/* ------------------------------------------------------------------ */
++
++int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
++{
++   uint32_t old = 0;
++
++   if (OSCompareAndSwapAtomicEx((uint32_t *)&once_control->status, 0, 1, &old))
++   {
++      init_routine();
++      OSCompareAndSwapAtomic((uint32_t *)&once_control->status, 1, 2);
++      return 0;
++   }
++
++   while (once_control->status != 2)
++      OSYieldThread();
++
+    return 0;
+ }
+-#endif
+-#endif
++
++/* ------------------------------------------------------------------ */
++/* Thread specific data                                               */
++/* ------------------------------------------------------------------ */
++
++typedef struct
++{
++   void (*destructor)(void *);
++   volatile int used;
++} wup_key;
++
++static wup_key keys[OS_THREAD_SPECIFIC_MAX];
++
++int pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
++{
++   int i;
++   for (i = 0; i < OS_THREAD_SPECIFIC_MAX; i++)
++   {
++      if (!keys[i].used)
++      {
++         keys[i].used = 1;
++         keys[i].destructor = destructor;
++         *key = (pthread_key_t)i;
++         return 0;
++      }
++   }
++   return EAGAIN;
++}
++
++int pthread_key_delete(pthread_key_t key)
++{
++   if (key >= OS_THREAD_SPECIFIC_MAX)
++      return EINVAL;
++   keys[key].used = 0;
++   keys[key].destructor = NULL;
++   return 0;
++}
++
++void *pthread_getspecific(pthread_key_t key)
++{
++   if (key >= OS_THREAD_SPECIFIC_MAX)
++      return NULL;
++   return OSGetThreadSpecific(key);
++}
++
++int pthread_setspecific(pthread_key_t key, const void *value)
++{
++   if (key >= OS_THREAD_SPECIFIC_MAX)
++      return EINVAL;
++   OSSetThreadSpecific(key, value);
++   return 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* Reader/writer locks (implemented as a recursive mutex)             */
++/* ------------------------------------------------------------------ */
++
++int pthread_rwlock_init(pthread_rwlock_t *rwlock, const pthread_rwlockattr_t *attr)
++{
++   (void)attr;
++   return pthread_mutex_init((pthread_mutex_t *)rwlock, NULL);
++}
++
++int pthread_rwlock_destroy(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_destroy((pthread_mutex_t *)rwlock);
++}
++
++int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_lock((pthread_mutex_t *)rwlock);
++}
++
++int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_lock((pthread_mutex_t *)rwlock);
++}
++
++int pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_trylock((pthread_mutex_t *)rwlock);
++}
++
++int pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_trylock((pthread_mutex_t *)rwlock);
++}
++
++int pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
++{
++   return pthread_mutex_unlock((pthread_mutex_t *)rwlock);
++}
++
++/* ------------------------------------------------------------------ */
++/* newlib internal locking (sys/lock.h)                               */
++/* ------------------------------------------------------------------ */
++
++static OSMutex *lock_object(_LOCK_T *lock)
++{
++   OSMutex *mutex = (OSMutex *)(uintptr_t)*lock;
++   if (!mutex)
++   {
++      OSMutex *candidate = (OSMutex *)calloc(1, sizeof(OSMutex));
++      if (!candidate)
++         return NULL;
++      OSInitMutex(candidate);
++      mutex = (OSMutex *)publish_swap(lock, candidate);
++   }
++   return mutex;
++}
++
++static OSCondition *cond_object(_COND_T *cond)
++{
++   OSCondition *c = (OSCondition *)(uintptr_t)*cond;
++   if (!c)
++   {
++      OSCondition *candidate = (OSCondition *)calloc(1, sizeof(OSCondition));
++      if (!candidate)
++         return NULL;
++      OSInitCond(candidate);
++      c = (OSCondition *)publish_swap(cond, candidate);
++   }
++   return c;
++}
++
++/* Recursive locks keep the pointer in the first word and the recursion
++ * count in the second one, matching _LOCK_RECURSIVE_T. */
++typedef struct
++{
++   _LOCK_T lock;
++   uint32_t count;
++} wup_recursive_lock;
++
++void __libc_lock_close(_LOCK_T *lock)
++{
++   free((void *)(uintptr_t)*lock);
++   *lock = 0;
++}
++
++void __libc_lock_close_recursive(_LOCK_RECURSIVE_T *lock)
++{
++   wup_recursive_lock *rlock = (wup_recursive_lock *)lock;
++   __libc_lock_close(&rlock->lock);
++   rlock->count = 0;
++}
++
++int __libc_lock(_LOCK_T *lock)
++{
++   __libc_lock_acquire(lock);
++   return 0;
++}
++
++int __libc_lock_recursive(_LOCK_RECURSIVE_T *lock)
++{
++   __libc_lock_acquire_recursive(lock);
++   return 0;
++}
++
++void __libc_lock_acquire(_LOCK_T *lock)
++{
++   OSMutex *mutex = lock_object(lock);
++   if (mutex)
++      OSLockMutex(mutex);
++}
++
++void __libc_lock_acquire_recursive(_LOCK_RECURSIVE_T *lock)
++{
++   wup_recursive_lock *rlock = (wup_recursive_lock *)lock;
++   wup_mutex_impl *impl = (wup_mutex_impl *)(uintptr_t)rlock->lock;
++
++   if (!impl)
++   {
++      wup_mutex_impl *candidate = (wup_mutex_impl *)calloc(1, sizeof(wup_mutex_impl));
++      if (!candidate)
++         return;
++      OSInitMutex(&candidate->mutex);
++      candidate->recursive = 1;
++      impl = (wup_mutex_impl *)publish_swap(&rlock->lock, candidate);
++   }
++
++   OSThread *self = OSGetCurrentThread();
++   if (impl->owner == self)
++   {
++      impl->count++;
++      return;
++   }
++
++   OSLockMutex(&impl->mutex);
++   impl->owner = self;
++   impl->count = 1;
++}
++
++void __libc_lock_release(_LOCK_T *lock)
++{
++   OSMutex *mutex = (OSMutex *)(uintptr_t)*lock;
++   if (mutex)
++      OSUnlockMutex(mutex);
++}
++
++void __libc_lock_release_recursive(_LOCK_RECURSIVE_T *lock)
++{
++   wup_recursive_lock *rlock = (wup_recursive_lock *)lock;
++   wup_mutex_impl *impl = (wup_mutex_impl *)(uintptr_t)rlock->lock;
++
++   if (!impl || impl->owner != OSGetCurrentThread())
++      return;
++
++   if (--impl->count == 0)
++   {
++      impl->owner = NULL;
++      OSUnlockMutex(&impl->mutex);
++   }
++}
++
++int __libc_lock_try_acquire(_LOCK_T *lock)
++{
++   OSMutex *mutex = lock_object(lock);
++   if (!mutex)
++      return 1;
++   return OSTryLockMutex(mutex) ? 0 : 1;
++}
++
++int __libc_lock_try_acquire_recursive(_LOCK_RECURSIVE_T *lock)
++{
++   wup_recursive_lock *rlock = (wup_recursive_lock *)lock;
++   wup_mutex_impl *impl = (wup_mutex_impl *)(uintptr_t)rlock->lock;
++
++   if (!impl)
++      return 1;
++
++   if (impl->owner == OSGetCurrentThread())
++   {
++      impl->count++;
++      return 0;
++   }
++
++   if (!OSTryLockMutex(&impl->mutex))
++      return 1;
++
++   impl->owner = OSGetCurrentThread();
++   impl->count = 1;
++   return 0;
++}
++
++void __libc_cond_close(_COND_T *cond)
++{
++   free((void *)(uintptr_t)*cond);
++   *cond = 0;
++}
++
++int __libc_cond_signal(_COND_T *cond)
++{
++   OSCondition *c = cond_object(cond);
++   if (!c)
++      return ENOMEM;
++   OSSignalCond(c);
++   return 0;
++}
++
++int __libc_cond_broadcast(_COND_T *cond)
++{
++   return __libc_cond_signal(cond);
++}
++
++typedef struct
++{
++   OSCondition *cond;
++   volatile int signalled;
++} wup_cond_wait_data;
++
++static void cond_wait_alarm_callback(OSAlarm *alarm, OSContext *context)
++{
++   wup_cond_wait_data *data = (wup_cond_wait_data *)OSGetAlarmUserData(alarm);
++   (void)context;
++   data->signalled = 1;
++   OSSignalCond(data->cond);
++}
++
++/* Waits on a coreinit condition variable, optionally with a timeout.
++ * timeout_ticks == 0 means "wait forever". */
++static int coreinit_cond_wait(OSCondition *cond, OSMutex *mutex, int64_t timeout_ticks)
++{
++   if (timeout_ticks <= 0)
++   {
++      OSWaitCond(cond, mutex);
++      return 0;
++   }
++
++   wup_cond_wait_data data;
++   data.cond = cond;
++   data.signalled = 0;
++
++   OSAlarm alarm;
++   OSCreateAlarm(&alarm);
++   OSSetAlarmUserData(&alarm, &data);
++   OSSetAlarm(&alarm, (OSTime)timeout_ticks, cond_wait_alarm_callback);
++
++   OSWaitCond(cond, mutex);
++
++   OSCancelAlarm(&alarm);
++
++   return data.signalled ? ETIMEDOUT : 0;
++}
++
++int __libc_cond_wait(_COND_T *cond, _LOCK_T *lock, uint64_t timeout_ns)
++{
++   OSCondition *c = cond_object(cond);
++   OSMutex *m = lock_object(lock);
++
++   if (!c || !m)
++      return ENOMEM;
++
++   int64_t ticks = timeout_ns ? (int64_t)ns_to_ticks(timeout_ns) : 0;
++   return coreinit_cond_wait(c, m, ticks);
++}
++
++int __libc_cond_wait_recursive(_COND_T *cond, _LOCK_RECURSIVE_T *lock, uint64_t timeout_ns)
++{
++   wup_recursive_lock *rlock = (wup_recursive_lock *)lock;
++   wup_mutex_impl *impl = (wup_mutex_impl *)(uintptr_t)rlock->lock;
++
++   if (!impl)
++      return EINVAL;
++
++   int64_t ticks = timeout_ns ? (int64_t)ns_to_ticks(timeout_ns) : 0;
++   return coreinit_cond_wait(cond_object(cond), &impl->mutex, ticks);
++}
+diff --git a/sd_fat_devoptab.c b/sd_fat_devoptab.c
+index 20a5b1b..b10105f 100644
+--- a/sd_fat_devoptab.c
++++ b/sd_fat_devoptab.c
+@@ -913,7 +913,7 @@ static int sd_fat_add_device (const char *name, const char *mount_path, void *pC
+ 
+     /* Add the device to the devoptab table (if there is a free slot) */
+     for (i = 3; i < STD_MAX; i++) {
+-        if (devoptab_list[i] == devoptab_list[0]) {
++        if (devoptab_list[i] == NULL || devoptab_list[i] == devoptab_list[0]) {
+             devoptab_list[i] = dev;
+             return 0;
+         }
+@@ -946,7 +946,7 @@ static int sd_fat_remove_device (const char *path, void **pClient, void **pCmd,
+         devoptab = devoptab_list[i];
+         if (devoptab && devoptab->name) {
+             if (strcmp(name, devoptab->name) == 0) {
+-                devoptab_list[i] = devoptab_list[0];
++                devoptab_list[i] = NULL;
+ 
+                 if(devoptab->deviceData)
+                 {

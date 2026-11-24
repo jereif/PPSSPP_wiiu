@@ -139,7 +139,7 @@ void DrawEngineGX2::ApplyDrawState(int prim) {
 	bool useBufferedRendering = framebufferManager_->UseBufferedRendering();
 	// Blend
 	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
-		gstate_c.SetAllowShaderBlend(!g_Config.bDisableSlowFramebufEffects);
+		gstate_c.SetAllowShaderBlend(false);
 		if (gstate.isModeClear()) {
 			keys_.blend.value = 0; // full wipe
 			keys_.blend.blendEnable = false;
@@ -237,7 +237,7 @@ void DrawEngineGX2::ApplyDrawState(int prim) {
 			bs1 = new GX2BlendState;
 			GX2InitColorControlReg(&bs1->color, keys_.blend.logicOpEnable ? keys_.blend.logicOp : GX2_LOGIC_OP_COPY, keys_.blend.blendEnable ? 0xFF : 0x00, false, keys_.blend.colorWriteMask != 0);
 			GX2InitTargetChannelMasksReg(&bs1->mask, keys_.blend.colorWriteMask, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0, (GX2ChannelMask)0);
-			GX2InitBlendControlReg(&bs1->blend, GX2_RENDER_TARGET_0, keys_.blend.srcColor, keys_.blend.destColor, keys_.blend.blendOpColor, keys_.blend.srcAlpha && keys_.blend.destAlpha, keys_.blend.srcAlpha, keys_.blend.destAlpha, keys_.blend.blendOpAlpha);
+			GX2InitBlendControlReg(&bs1->blend, GX2_RENDER_TARGET_0, keys_.blend.srcColor, keys_.blend.destColor, keys_.blend.blendOpColor, keys_.blend.srcAlpha != keys_.blend.srcColor || keys_.blend.destAlpha != keys_.blend.destColor || keys_.blend.blendOpAlpha != keys_.blend.blendOpColor, keys_.blend.srcAlpha, keys_.blend.destAlpha, keys_.blend.blendOpAlpha);
 			blendCache_.Insert(keys_.blend.value, bs1);
 		}
 		blendState_ = bs1;
@@ -286,6 +286,7 @@ void DrawEngineGX2::ApplyDrawState(int prim) {
 				// We override this value in the pipeline from software transform for clear rectangles.
 				dynState_.stencilRef = 0xFF;
 				// But we still apply the stencil write mask.
+				keys_.depthStencil.stencilCompareMask = 0xFF;
 				keys_.depthStencil.stencilWriteMask = (~gstate.getStencilWriteMask()) & 0xFF;
 			} else {
 				keys_.depthStencil.stencilTestEnable = false;
@@ -424,7 +425,7 @@ void DrawEngineGX2::ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef)
 		GX2SetDepthStencilControlReg(depthStencilState_);
 		if (!applyStencilRef)
 			stencilRef = dynState_.stencilRef;
-		GX2SetStencilMask(0xFF, 0xFF, stencilRef, 0xFF, 0xFF, stencilRef);
+		GX2SetStencilMask(keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef, keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef);
 	}
 	gstate_c.Clean(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE | DIRTY_BLEND_STATE);
 
