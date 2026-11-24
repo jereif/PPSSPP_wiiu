@@ -1172,7 +1172,19 @@ int GPUCommon::GetNextListIndex() {
 	}
 }
 
+#ifdef __wiiu__
+#include <wiiu/os/time.h>
+#include "GPU/GX2/ShaderManagerGX2.h"
+#endif
+
 void GPUCommon::ProcessDLQueue() {
+#ifdef __wiiu__
+	u64 geT0 = OSGetSystemTime();
+	struct GeTimerGuard {
+		u64 t0;
+		~GeTimerGuard() { g_gx2Perf.geTicks += OSGetSystemTime() - t0; }
+	} geGuard{ geT0 };
+#endif
 	startingTicks = CoreTiming::GetTicks();
 	cyclesExecuted = 0;
 

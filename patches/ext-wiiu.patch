@@ -127,10 +127,18 @@ index 2d2461c..e344465 100644
     puts(exception_msgbuf);
     DEBUG_STR(OSGetThreadName(OSGetCurrentThread()));
 diff --git a/imports.h b/imports.h
-index 76d3c8b..2dbac26 100644
+index 76d3c8b..81112a8 100644
 --- a/imports.h
 +++ b/imports.h
-@@ -112,7 +112,9 @@ FIMPORT(MEMDestroyExpHeap)
+@@ -65,6 +65,7 @@ FIMPORT(OSAllocVirtAddr)
+ FIMPORT(OSFreeVirtAddr)
+ FIMPORT(OSQueryVirtAddr)
+ FIMPORT(OSGetMapVirtAddrRange)
++FIMPORT(OSGetCodegenVirtAddrRange)
+ FIMPORT(OSGetDataPhysAddrRange)
+ FIMPORT(OSGetAvailPhysAddrRange)
+ FIMPORT(OSMapMemory)
+@@ -112,7 +113,9 @@ FIMPORT(MEMDestroyExpHeap)
  FIMPORT(MEMAllocFromExpHeapEx)
  FIMPORT(MEMFreeToExpHeap)
  FIMPORT(MEMGetTotalFreeSizeForExpHeap)
@@ -140,7 +148,7 @@ index 76d3c8b..2dbac26 100644
  FIMPORT(MEMAllocFromFrmHeapEx)
  FIMPORT(MEMFreeToFrmHeap)
  FIMPORT(MEMGetAllocatableSizeForFrmHeapEx)
-@@ -207,6 +209,7 @@ FIMPORT(GX2SetContextState)
+@@ -207,6 +210,7 @@ FIMPORT(GX2SetContextState)
  FIMPORT(GX2SetColorBuffer)
  FIMPORT(GX2SetDepthBuffer)
  FIMPORT(GX2SetViewport)
@@ -148,7 +156,7 @@ index 76d3c8b..2dbac26 100644
  FIMPORT(GX2SetViewportReg)
  FIMPORT(GX2SetScissor)
  FIMPORT(GX2GetScissorReg)
-@@ -226,6 +229,7 @@ FIMPORT(GX2SetDepthStencilControlReg)
+@@ -226,6 +230,7 @@ FIMPORT(GX2SetDepthStencilControlReg)
  FIMPORT(GX2SetBlendConstantColor)
  FIMPORT(GX2SetBlendConstantColorReg)
  FIMPORT(GX2SetCullOnlyControl)
@@ -156,7 +164,7 @@ index 76d3c8b..2dbac26 100644
  FIMPORT(GX2CalcFetchShaderSizeEx)
  FIMPORT(GX2InitFetchShaderEx)
  FIMPORT(GX2SetFetchShader)
-@@ -278,6 +282,9 @@ FIMPORT(GX2FreeTilingAperture)
+@@ -278,6 +283,9 @@ FIMPORT(GX2FreeTilingAperture)
  FIMPORT_BEGIN(proc_ui)
  FIMPORT(ProcUIInit)
  FIMPORT(ProcUIShutdown)
@@ -190,6 +198,18 @@ index f043196..9ca5f7e 100644
  	void CALL_FS(bool barrier = BARRIER) { emitCF(CF_DWORD0(0), CF_DWORD1(CF_INST::CALL_FS, barrier)); }
  
  	void END_OF_PROGRAM() {
+diff --git a/include/wiiu/os/memory.h b/include/wiiu/os/memory.h
+index 85c4d6f..c00b6e8 100644
+--- a/include/wiiu/os/memory.h
++++ b/include/wiiu/os/memory.h
+@@ -32,6 +32,7 @@ void* OSAllocVirtAddr(void* vaddr, int size, int align);
+ BOOL OSFreeVirtAddr(void* vaddr, int size);
+ int OSQueryVirtAddr(void* vaddr);
+ void OSGetMapVirtAddrRange(void** vaddr, u32* size);
++BOOL OSGetCodegenVirtAddrRange(u32* vaddr, u32* size);
+ void OSGetDataPhysAddrRange(u32* paddr, u32* size);
+ void OSGetAvailPhysAddrRange(u32* paddr, u32* size);
+ BOOL OSMapMemory(void* vaddr, u32 paddr, int size, int mode);
 diff --git a/logger.c b/logger.c
 index 25272ac..03c6244 100644
 --- a/logger.c

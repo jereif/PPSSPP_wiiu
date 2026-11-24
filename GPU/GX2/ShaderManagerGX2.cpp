@@ -22,6 +22,7 @@
 #include <wiiu/gx2/shader_disasm.hpp>
 #include <wiiu/gx2/shader_info.h>
 
+#include <wiiu/os/time.h>
 #include "Common/Math/lin/matrix4x4.h"
 #include "Common/Math/math_util.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
@@ -201,37 +202,50 @@ void ShaderManagerGX2::DirtyLastShader() {
 	lastVSID_.set_invalid();
 	lastVShader_ = nullptr;
 	lastFShader_ = nullptr;
+	dirtyEpoch_++;
+	psBaseBound_ = false;
 	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_ALL_UNIFORMS);
+}
+
+static inline void CopySwapU32(u32 *dst, const u32 *src, size_t count) {
+	for (size_t i = 0; i < count; i++) {
+		dst[i] = __builtin_bswap32(src[i]);
+	}
 }
 
 uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedRendering) {
 	uint64_t dirty = gstate_c.GetDirtyUniforms();
 	if (dirty != 0) {
+		u64 uboT0 = OSGetSystemTime();
 		if (dirty & DIRTY_BASE_UNIFORMS) {
 			BaseUpdateUniforms(&ub_base, dirty, true, useBufferedRendering);
-			u32_le *push_base = (u32_le *)push->BeginPush(nullptr, sizeof(ub_base));
-			for (int i = 0; i < sizeof(ub_base) / 4; i++)
-				push_base[i] = ((u32 *)&ub_base)[i];
+			u32 *push_base = (u32 *)push->BeginPush(nullptr, sizeof(ub_base));
+			CopySwapU32(push_base, (const u32 *)&ub_base, sizeof(ub_base) / 4);
 			push->EndPush();
 			GX2SetVertexUniformBlock(1, sizeof(ub_base), push_base);
-			GX2SetPixelUniformBlock(1, sizeof(ub_base), push_base);
+			static const uint64_t DIRTY_FS_BASE =
+				DIRTY_ALPHACOLORREF | DIRTY_FOGCOLOR | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
+				DIRTY_ALPHACOLORMASK | DIRTY_SHADERBLEND | DIRTY_TEXCLAMP | DIRTY_DEPAL | DIRTY_DEPTHRANGE;
+			if (!psBaseBound_ || (dirty & DIRTY_FS_BASE)) {
+				GX2SetPixelUniformBlock(1, sizeof(ub_base), push_base);
+				psBaseBound_ = true;
+			}
 		}
 		if (dirty & DIRTY_LIGHT_UNIFORMS) {
 			LightUpdateUniforms(&ub_lights, dirty);
-			u32_le *push_lights = (u32_le *)push->BeginPush(nullptr, sizeof(ub_lights));
-			for (int i = 0; i < sizeof(ub_lights) / 4; i++)
-				push_lights[i] = ((u32 *)&ub_lights)[i];
+			u32 *push_lights = (u32 *)push->BeginPush(nullptr, sizeof(ub_lights));
+			CopySwapU32(push_lights, (const u32 *)&ub_lights, sizeof(ub_lights) / 4);
 			push->EndPush();
 			GX2SetVertexUniformBlock(2, sizeof(ub_lights), push_lights);
 		}
 		if (dirty & DIRTY_BONE_UNIFORMS) {
 			BoneUpdateUniforms(&ub_bones, dirty);
-			u32_le *push_bones = (u32_le *)push->BeginPush(nullptr, sizeof(ub_bones));
-			for (int i = 0; i < sizeof(ub_bones) / 4; i++)
-				push_bones[i] = ((u32 *)&ub_bones)[i];
+			u32 *push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
+			CopySwapU32(push_bones, (const u32 *)&ub_bones, sizeof(ub_bones) / 4);
 			push->EndPush();
 			GX2SetVertexUniformBlock(3, sizeof(ub_bones), push_bones);
 		}
+		g_gx2Perf.uboTicks += OSGetSystemTime() - uboT0;
 	}
 	gstate_c.CleanUniforms();
 	return dirty;

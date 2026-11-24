@@ -60,6 +60,15 @@ static void InitWiiUExecutableHeap() {
 	if (rwx_heap)
 		return;
 
+	{
+		u32 cgAddr = 0, cgSize = 0, pAddr = 0, pSize = 0;
+		BOOL cgOk = OSGetCodegenVirtAddrRange(&cgAddr, &cgSize);
+		int qCg = cgAddr ? OSQueryVirtAddr((void *)(uintptr_t)cgAddr) : -1;
+		OSGetAvailPhysAddrRange(&pAddr, &pSize);
+		WiiU_LogJit("jit: OSGetCodegenVirtAddrRange ok=%d addr=0x%08X size=%u query=%d availPhys=0x%08X(%u)",
+			(int)cgOk, (unsigned)cgAddr, (unsigned)cgSize, qCg, (unsigned)pAddr, (unsigned)pSize);
+	}
+
 	const uintptr_t rwxStart = 0x00800000;
 	const uintptr_t rwxEnd   = 0x01000000;
 
@@ -149,13 +158,13 @@ static void InitWiiUExecutableHeap() {
 	}
 
 	const uintptr_t guardBottom = 0x20000;
-	const uintptr_t guardTop    = 0x10000;
+	const uintptr_t guardTop    = 0x4000;
 	uint32_t zeroUsable = 0;
 	if (bestZeroEnd > bestZeroStart && (bestZeroEnd - bestZeroStart) > (guardBottom + guardTop)) {
 		zeroUsable = (uint32_t)((bestZeroEnd - bestZeroStart) - (guardBottom + guardTop));
 	}
-	uint32_t expUsable = (bestExpHeap && bestExpAvail > 128 * 1024) ? (bestExpAvail - 128 * 1024) : 0;
-	uint32_t frmUsable = (bestFrmHeap && bestFrmAvail > 128 * 1024) ? (bestFrmAvail - 128 * 1024) : 0;
+	uint32_t expUsable = (bestExpHeap && bestExpAvail > 64 * 1024) ? (bestExpAvail - 64 * 1024) : 0;
+	uint32_t frmUsable = (bestFrmHeap && bestFrmAvail > 64 * 1024) ? (bestFrmAvail - 64 * 1024) : 0;
 
 	WiiU_LogJit("jit: RWX candidates -> expUsable=%u frmUsable=%u zeroUsable=%u (0x%08X..0x%08X)",
 	            (unsigned)expUsable, (unsigned)frmUsable, (unsigned)zeroUsable,

@@ -39,13 +39,11 @@ const u8 *Jit::DoJit(u32 em_address, JitBlock *b)
 
 	// We add a check before the block, used when entering from a linked block.
 	b->checkedEntry = (u8*)GetCodePtr();
-	// Downcount flag check. The last block decremented downcounter, and the flag should still be available.
-	
-	MOVI2R(SREG, js.blockStart);
-
-	// if (currentMIPS->downcount<0)
 	CMPI(DCNTREG, 0);
-	BLT((const void *)outerLoopPCInR0);
+	FixupBranch skipOuter = B_Cond(_BGE);
+	MOVI2R(SREG, js.blockStart);
+	B((const void *)outerLoopPCInR0);
+	SetJumpTarget(skipOuter);
 
 	b->normalEntry = GetCodePtr();
 	// TODO: this needs work
@@ -94,8 +92,6 @@ const u8 *Jit::DoJit(u32 em_address, JitBlock *b)
 	}
 #endif	
 	//DumpJit();
-
-	AlignCode16();
 
 	// Don't forget to zap the instruction cache!
 	FlushIcache();
@@ -250,9 +246,10 @@ void Jit::GenerateFixedCode() {
 						
 			// Update downcount reg value from memory
 			RestoreDowncount(DCNTREG);
-			
-			// branch to dispatcherNoCheck:
-			B(dispatcherNoCheck); // no point in special casing this
+			CMPI(DCNTREG, 0);
+
+			// Check downcount/coreState and dispatch next block (needed when Compile interprets a cold block).
+			B(dispatcherCheckCoreState);
 		// }
 
 		// label bail:
@@ -335,6 +332,23 @@ void Jit::GenerateFixedCode() {
 		FMUL(FPR4, FPR4, FPR9);
 	}
 	FMUL(FPR4, FPR5, FPR4);
+	BLR();
+
+	// Shared trampoline for Comp_Generic: R3 = op.encoding, R4 = compilerPC, R5 = interpret func.
+	compGenericTrampoline = AlignCode16();
+	MFLR(R0);
+	STW(R0, R1, 24);
+	SaveDowncount(DCNTREG);
+	MovToPC(R4);
+#ifdef __wiiu__
+	STW(R3, R1, 20);
+	ADDI(R3, R1, 20);
+#endif
+	MTCTR(R5);
+	BCTRL();
+	RestoreDowncount(DCNTREG);
+	LWZ(R0, R1, 24);
+	MTLR(R0);
 	BLR();
 
 	// Don't forget to zap the instruction cache!

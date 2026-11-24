@@ -35,6 +35,8 @@ struct DecVtxFormat;
 struct UVScale;
 
 class GX2VertexShader;
+class GX2VShader;
+class GX2PShader;
 class ShaderManagerGX2;
 class TextureCacheGX2;
 class FramebufferManagerGX2;
@@ -218,4 +220,8 @@ private:
 	};
 
 	int lastRenderStepId_ = -1;
+	GX2VShader *lastBoundVShader_ = nullptr;
+	GX2PShader *lastBoundFShader_ = nullptr;
+	GX2FetchShader *lastBoundFetchShader_ = nullptr;
+	u32 boundShaderEpoch_ = 0xFFFFFFFF;
 };

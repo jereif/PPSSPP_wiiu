@@ -185,29 +185,31 @@ void GX2GraphicsContext::SwapBuffers() {
 	GX2CopyColorBufferToScanBuffer(&color_buffer_, GX2_SCAN_TARGET_TV);
 	GX2SwapScanBuffers();
 	GX2Flush();
-	double t0 = time_now_d();
-	GX2DrawDone();
 	double t1 = time_now_d();
 	GX2WaitForFlip();
 	double t2 = time_now_d();
 	{
-		// Perf diagnostics: average frame time vs. GPU draw done vs. flip wait.
-		static double lastSwap = 0.0, accFrame = 0.0, accDraw = 0.0, accFlip = 0.0;
+		// Perf diagnostics: average frame time vs. CPU/GE/flush/UBO breakdown.
+		static double lastSwap = 0.0, accFrame = 0.0, accFlip = 0.0;
 		static int accCount = 0;
 		if (lastSwap != 0.0) {
 			accFrame += t2 - lastSwap;
-			accDraw += t1 - t0;
 			accFlip += t2 - t1;
 			accCount++;
 		}
 		lastSwap = t2;
 		if (accCount >= 300) {
-			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), DrawDone %.2f ms, WaitFlip %.2f ms, draws %.1f (sw %.1f, psAll %.1f, vsFB %.1f)",
+			double jitMs = (double)ticks_to_us(g_gx2Perf.jitTicks) / (1000.0 * accCount);
+			double geMs = (double)ticks_to_us(g_gx2Perf.geTicks) / (1000.0 * accCount);
+			double flushMs = (double)ticks_to_us(g_gx2Perf.flushTicks) / (1000.0 * accCount);
+			double uboMs = (double)ticks_to_us(g_gx2Perf.uboTicks) / (1000.0 * accCount);
+			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), WaitFlip %.2f ms, jit %.2f ms (cpu %.2f, ge %.2f, flush %.2f, ubo %.2f), draws %.1f (sw %.1f, psAll %.1f)",
 				accFrame * 1000.0 / accCount, accCount / accFrame,
-				accDraw * 1000.0 / accCount, accFlip * 1000.0 / accCount,
+				accFlip * 1000.0 / accCount,
+				jitMs, jitMs - geMs, geMs, flushMs, uboMs,
 				(double)g_gx2Perf.draws / accCount, (double)g_gx2Perf.swDraws / accCount,
-				(double)g_gx2Perf.psAllDraws / accCount, (double)g_gx2Perf.vsFallbackDraws / accCount);
-			accFrame = accDraw = accFlip = 0.0;
+				(double)g_gx2Perf.psAllDraws / accCount);
+			accFrame = accFlip = 0.0;
 			accCount = 0;
 			g_gx2Perf = {};
 		}

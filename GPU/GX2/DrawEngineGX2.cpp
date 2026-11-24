@@ -37,6 +37,7 @@
 #include "GPU/Common/TransformCommon.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
+#include <wiiu/os/time.h>
 #include "GPU/GX2/FramebufferManagerGX2.h"
 #include "GPU/GX2/TextureCacheGX2.h"
 #include "GPU/GX2/DrawEngineGX2.h"
@@ -118,6 +119,7 @@ void DrawEngineGX2::ClearInputLayoutMap() {
 		delete il;
 	});
 	fetchShaderMap_.Clear();
+	lastBoundFetchShader_ = nullptr;
 }
 
 void DrawEngineGX2::Resized() {
@@ -276,7 +278,7 @@ void DrawEngineGX2::BeginFrame() {
 		shaderManager_->DirtyLastShader();
 	}
 
-	if (gpuStats.numFlips > 0 && (gpuStats.numFlips % 300) == 180 && s_snapFrame != gpuStats.numFlips) {
+	if (false && gpuStats.numFlips > 0 && (gpuStats.numFlips % 300) == 180 && s_snapFrame != gpuStats.numFlips) {
 		s_snapFrame = gpuStats.numFlips;
 		s_snapCount = 0;
 		{
@@ -386,6 +388,7 @@ void DrawEngineGX2::DoFlush() {
 	// until critical state changes. That's when we draw (flush).
 
 	GEPrimitiveType prim = prevPrim_;
+	u64 flushT0 = OSGetSystemTime();
 	ApplyDrawState(prim);
 
 	// Always use software for flat shading to fix the provoking index.
@@ -454,16 +457,12 @@ void DrawEngineGX2::DoFlush() {
 						goto rotateVBO;
 					}
 					if (vai->numVerts > 64) {
-						// exponential backoff up to 16 draws, then every 24
+						// exponential backoff up to 24 frames
 						vai->drawsUntilNextFullHash = std::min(24, vai->numFrames);
 					} else {
 						// Lower numbers seem much more likely to change.
 						vai->drawsUntilNextFullHash = 0;
 					}
-					// TODO: tweak
-					// if (vai->numFrames > 1000) {
-					//	vai->status = VertexArrayInfo::VAI_RELIABLE;
-					//}
 				} else {
 					vai->drawsUntilNextFullHash--;
 					u32 newMiniHash = ComputeMiniHash();
@@ -566,7 +565,7 @@ void DrawEngineGX2::DoFlush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
-		ApplyDrawStateLate(true, dynState_.stencilRef);
+		ApplyDrawStateLate(false, dynState_.stencilRef);
 
 		GX2VShader *vshader;
 		GX2PShader *fshader;
@@ -612,11 +611,26 @@ void DrawEngineGX2::DoFlush() {
 			}
 		}
 		GX2FetchShader *fetchShader = SetupFetchShaderForDraw(vshader, dec_->GetDecVtxFmt(), dec_->VertexType());
-		GX2SetPixelShader(fshader);
-		GX2SetVertexShader(vshader);
+		if (boundShaderEpoch_ != shaderManager_->GetDirtyEpoch()) {
+			boundShaderEpoch_ = shaderManager_->GetDirtyEpoch();
+			lastBoundVShader_ = nullptr;
+			lastBoundFShader_ = nullptr;
+			lastBoundFetchShader_ = nullptr;
+		}
+		if (fshader != lastBoundFShader_) {
+			GX2SetPixelShader(fshader);
+			lastBoundFShader_ = fshader;
+		}
+		if (vshader != lastBoundVShader_) {
+			GX2SetVertexShader(vshader);
+			lastBoundVShader_ = vshader;
+		}
 		shaderManager_->UpdateUniforms(pushUBO_, framebufferManager_->UseBufferedRendering());
 
-		GX2SetFetchShader(fetchShader);
+		if (fetchShader != lastBoundFetchShader_) {
+			GX2SetFetchShader(fetchShader);
+			lastBoundFetchShader_ = fetchShader;
+		}
 		u32 stride = dec_->GetDecVtxFmt().stride;
 		//		GX2prim[prim];
 		if (!vb_) {
@@ -712,8 +726,20 @@ void DrawEngineGX2::DoFlush() {
 					w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9],
 					w[stw], w[stw + 1], w[stw + 2], w[stw + 3], w[stw + 4], w[stw + 5], w[stw + 6], w[stw + 7], w[stw + 8], w[stw + 9]);
 			}
-			GX2SetPixelShader(fshader);
-			GX2SetVertexShader(vshader);
+			if (boundShaderEpoch_ != shaderManager_->GetDirtyEpoch()) {
+				boundShaderEpoch_ = shaderManager_->GetDirtyEpoch();
+				lastBoundVShader_ = nullptr;
+				lastBoundFShader_ = nullptr;
+				lastBoundFetchShader_ = nullptr;
+			}
+			if (fshader != lastBoundFShader_) {
+				GX2SetPixelShader(fshader);
+				lastBoundFShader_ = fshader;
+			}
+			if (vshader != lastBoundVShader_) {
+				GX2SetVertexShader(vshader);
+				lastBoundVShader_ = vshader;
+			}
 			shaderManager_->UpdateUniforms(pushUBO_, framebufferManager_->UseBufferedRendering());
 
 			// We really do need a vertex layout for each vertex shader (or at least check its ID bits for what inputs it uses)!
@@ -728,7 +754,10 @@ void DrawEngineGX2::DoFlush() {
 				GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, fetchShader->program, fetchShader->size);
 				fetchShaderMap_.Insert(key, fetchShader);
 			}
-			GX2SetFetchShader(fetchShader);
+			if (fetchShader != lastBoundFetchShader_) {
+				GX2SetFetchShader(fetchShader);
+				lastBoundFetchShader_ = fetchShader;
+			}
 
 			u32 stride = sizeof(TransformedVertex);
 			u32 vOffset = 0;
@@ -788,6 +817,7 @@ void DrawEngineGX2::DoFlush() {
 
 	gpuStats.numDrawCalls += numDrawCalls;
 	gpuStats.numVertsSubmitted += vertexCountInDrawCalls_;
+	g_gx2Perf.flushTicks += OSGetSystemTime() - flushT0;
 
 	indexGen.Reset();
 	decodedVerts_ = 0;

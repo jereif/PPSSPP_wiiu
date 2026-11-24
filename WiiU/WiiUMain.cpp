@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
 	g_Config.bSoftwareSkinning = false;
 	g_Config.bVertexCache = true;
 //	PSP_CoreParameter().gpuCore = GPUCORE_NULL;
-//	g_Config.bTextureBackoffCache = true;
+	g_Config.bTextureBackoffCache = true;
 	std::string error_string;
 	GraphicsContext *ctx;
 	bool gfxOk = host->InitGraphics(&error_string, &ctx);

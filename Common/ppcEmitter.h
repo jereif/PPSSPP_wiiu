@@ -240,6 +240,7 @@ namespace PpcGen
 		// Arithmetics ops
 		void ADD	(PPCReg Rd, PPCReg Ra, PPCReg Rb);
 		void ADDI	(PPCReg Rd, PPCReg Ra, short imm);
+		void ADDIC_	(PPCReg Rd, PPCReg Ra, short imm);
 		void ADDIS	(PPCReg Rd, PPCReg Ra, short imm);
 		void ADDC	(PPCReg Rd, PPCReg Ra, PPCReg Rb);
 		void ADDZE	(PPCReg Rd, PPCReg Ra);

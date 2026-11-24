@@ -506,6 +506,9 @@ namespace PpcGen {
 	void PPCXEmitter::SUBFIC(PPCReg Rt, PPCReg Ra, short imm) {
 		D_FORM(8, Rt, Ra, imm);
 	}
+	void PPCXEmitter::ADDIC_(PPCReg Rd, PPCReg Ra, short imm) {
+		D_FORM(13, Rd, Ra, imm);
+	}
 
 	
 	void PPCXEmitter::SUBFE(PPCReg Rd, PPCReg Ra, PPCReg Rb) {	

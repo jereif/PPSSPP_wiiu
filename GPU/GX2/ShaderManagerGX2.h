@@ -132,6 +132,10 @@ struct GX2PerfCounters {
 	u32 swDraws;
 	u32 psAllDraws;
 	u32 vsFallbackDraws;
+	u64 jitTicks;
+	u64 geTicks;
+	u64 flushTicks;
+	u64 uboTicks;
 };
 extern GX2PerfCounters g_gx2Perf;
 
@@ -193,6 +197,7 @@ public:
 	std::string DebugGetShaderString(std::string id, DebugShaderType type, DebugShaderStringType stringType);
 
 	uint64_t UpdateUniforms(PushBufferGX2 *push, bool useBufferedRendering);
+	u32 GetDirtyEpoch() const { return dirtyEpoch_; }
 
 	// TODO: Avoid copying these buffers if same as last draw, can still point to it assuming we're still in the same pushbuffer.
 	// Applies dirty changes and copies the buffer.
@@ -219,4 +224,6 @@ private:
 
 	FShaderID lastFSID_;
 	VShaderID lastVSID_;
+	u32 dirtyEpoch_ = 0;
+	bool psBaseBound_ = false;
 };

@@ -19,6 +19,7 @@
 #include <malloc.h>
 #ifdef __wiiu__
 #include <wiiu/os/time.h>
+#include "GPU/GX2/ShaderManagerGX2.h"
 #endif
 #include <map>
 #include <string>
@@ -63,28 +64,23 @@ static void LogJitStats(const char *reason, size_t spaceLeft, size_t regionSize)
 
 void Jit::CompileDelaySlot(int flags)
 {
-	// preserve flag around the delay slot! Maybe this is not always necessary on ARM where 
-	// we can (mostly) control whether we set the flag or not. Of course, if someone puts an slt in to the
-	// delay slot, we're screwed.
-	if (flags & DELAYSLOT_SAFE) {
-		// Save flags register
-		MOVI2R(SREG, (u32)&delaySlotFlagsValue);
-		STW(FLAGREG, SREG);
+	MIPSOpcode op = Memory::Read_Instruction(js.compilerPC + 4);
+	// Only CR0 needs preservation across non-NOP delay slots (FLAGREG is not used by conditional branches).
+	bool needSaveCR = (flags & DELAYSLOT_SAFE) && (op.encoding != 0);
+	if (needSaveCR) {
 		MFCR(R19);
 	}
 
 	js.inDelaySlot = true;
-	MIPSOpcode op = Memory::Read_Instruction(js.compilerPC + 4);
-	MIPSCompileOp(op, this);
+	if (op.encoding != 0) {
+		MIPSCompileOp(op, this);
+	}
 	js.inDelaySlot = false;
 
 	if (flags & DELAYSLOT_FLUSH)
 		FlushAll();
 
-	if (flags & DELAYSLOT_SAFE) {
-		// Restore flags register
-		MOVI2R(SREG, (u32)&delaySlotFlagsValue);
-		LWZ(FLAGREG, SREG);
+	if (needSaveCR) {
 		MTCR(R19);
 	}
 }
@@ -92,6 +88,31 @@ void Jit::CompileDelaySlot(int flags)
 void Jit::Compile(u32 em_address)
 {
 	PROFILE_THIS_SCOPE("jitc");
+#ifdef __wiiu__
+	// Two-tier JIT for Wii U's 1.78 MB RWX space: interpret cold blocks until they run
+	// kHotThreshold times so one-shot/rare blocks never evict hot gameplay blocks.
+	static const u8 kHotThreshold = 24;
+	u32 hidx = (em_address >> 2) & 0xFFFF;
+	if (hotCounts_[hidx] < kHotThreshold && !mips_->inDelaySlot) {
+		hotCounts_[hidx]++;
+		int steps = 0;
+		while (coreState == CORE_RUNNING && (steps < 64 || mips_->inDelaySlot)) {
+			if (!mips_->inDelaySlot && steps > 0) {
+				MIPSOpcode nextOp = Memory::Read_Opcode_JIT(mips_->pc);
+				if (MIPS_IS_EMUHACK(nextOp))
+					break;
+			}
+			bool wasDelay = mips_->inDelaySlot;
+			u32 prevPC = mips_->pc;
+			MIPS_SingleStep();
+			mips_->downcount--;
+			steps++;
+			if (wasDelay || (!mips_->inDelaySlot && mips_->pc != prevPC + 4))
+				break;
+		}
+		return;
+	}
+#endif
 	u64 compileStart = OSGetSystemTime();
 	if (!g_firstCompileTick)
 		g_firstCompileTick = compileStart;
@@ -182,53 +203,35 @@ static void ShowDownCount() {
 
 void Jit::WriteDownCount(int offset)
 {
-	// don't know if the result is correct
 	int theDowncount = js.downcountAmount + offset;
-	if (jo.downcountInRegister) {		
-		// DCNTREG = DCNTREG - theDowncount;
-		MOVI2R(SREG, theDowncount);	
-		SUBF(DCNTREG, SREG, DCNTREG, 1);
-		STW(DCNTREG, CTXREG, offsetof(MIPSState, downcount));
+	if (jo.downcountInRegister) {
+		if (theDowncount >= -32767 && theDowncount <= 32768) {
+			// Single instruction: DCNTREG -= theDowncount, updates CR0 for BLT.
+			ADDIC_(DCNTREG, DCNTREG, (short)(-theDowncount));
+		} else {
+			MOVI2R(SREG, theDowncount);
+			SUBF(DCNTREG, SREG, DCNTREG, 1);
+		}
 	} else {
 		// DCNTREG = MIPSState->downcount - theDowncount;
-		MOVI2R(SREG, theDowncount);	
+		MOVI2R(SREG, theDowncount);
 		LWZ(DCNTREG, CTXREG, offsetof(MIPSState, downcount));
 		SUBF(DCNTREG, SREG, DCNTREG, 1);
 		STW(DCNTREG, CTXREG, offsetof(MIPSState, downcount));
 	}
-
-	//QuickCallFunction(ShowDownCount);
-
-	CMPI(DCNTREG, 0);
 }
 
 void Jit::Comp_Generic(MIPSOpcode op) {
-	{
-		const char *name = MIPSGetName(op);
-		g_fallbackCounts[name ? name : "?"]++;
-	}
 	FlushAll();
 
 	// basic jit !!
 	MIPSInterpretFunc func = MIPSGetInterpretFunc(op);
 	if (func)
 	{
-		// Save mips PC and cycles
-		SaveDowncount(DCNTREG);
-		MOVI2R(SREG, js.compilerPC);
-		MovToPC(SREG);
-
-		// call interpreted function
 		MOVI2R(R3, op.encoding);
-#ifdef __wiiu__
-		// R3 is expected to contain the address of the 4-byte MIPSOpcode struct ...
-		STW(R3, R1, 20);
-		ADDI(R3, R1, 20);
-#endif
-		QuickCallFunction((void *)func);
-
-		// restore pc and cycles
-		RestoreDowncount(DCNTREG);
+		MOVI2R(R4, js.compilerPC);
+		MOVI2R(R5, (u32)func);
+		BL(compGenericTrampoline);
 	}
 	const MIPSInfo info = MIPSGetInfo(op);
 	if ((info & IS_VFPU) != 0 && (info & VFPU_NO_PREFIX) == 0)
@@ -300,6 +303,9 @@ void Jit::ClearCache() {
 	blocks.Clear();
 	ClearCodeSpace(0);
 	GenerateFixedCode();
+#ifdef __wiiu__
+	memset(hotCounts_, 0, sizeof(hotCounts_));
+#endif
 }
 
 void Jit::InvalidateCache() {
@@ -312,16 +318,19 @@ void Jit::InvalidateCacheAt(u32 em_address, int length) {
 
 Jit::Jit(MIPSState *mips) : blocks(mips, this), gpr(mips, &jo),fpr(mips),mips_(mips)
 { 
+#ifdef __wiiu__
+	memset(hotCounts_, 0, sizeof(hotCounts_));
+#endif
 	blocks.Init();
 	gpr.SetEmitter(this);
 	fpr.SetEmitter(this);
 #ifdef __wiiu__
 	// RWX memory in 0x00800000-0x01000000 is shared with Aroma modules; use as much as is available (max 8 MB).
 	{
-		size_t maxSz = GetMaxExecutableAllocSize() & ~(size_t)0xFFFF;
+		size_t maxSz = GetMaxExecutableAllocSize() & ~(size_t)0xFFF;
 		if (maxSz > 8 * 1024 * 1024)
 			maxSz = 8 * 1024 * 1024;
-		for (int sz = (int)maxSz; sz >= 512 * 1024; sz -= 64 * 1024) {
+		for (int sz = (int)maxSz; sz >= 512 * 1024; sz -= 16 * 1024) {
 			AllocCodeSpace(sz);
 			if (GetBasePtr() != nullptr) {
 				NOTICE_LOG(JIT, "JIT code space: %d bytes at %p", sz, GetBasePtr());
@@ -339,13 +348,14 @@ Jit::Jit(MIPSState *mips) : blocks(mips, this), gpr(mips, &jo),fpr(mips),mips_(m
 
 void Jit::RunLoopUntil(u64 globalticks) {	
 	PROFILE_THIS_SCOPE("jit");
-#ifdef _XBOX
-	// force stack alinement
-	//_alloca(16*1024);
+#ifdef __wiiu__
+	u64 t0 = OSGetSystemTime();
 #endif
-	
 	// Run the compiled code
 	((void (*)())enterCode)();
+#ifdef __wiiu__
+	g_gx2Perf.jitTicks += OSGetSystemTime() - t0;
+#endif
 }
 
 

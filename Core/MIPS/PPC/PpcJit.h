@@ -333,6 +333,10 @@ namespace MIPSComp
 
 		const u8 *ppcInvSqrt;
 		const u8 *ppcSqrt;
+		const u8 *compGenericTrampoline;
+#ifdef __wiiu__
+		u8 hotCounts_[65536];
+#endif
 	};
 	
 }	// namespace MIPSComp
