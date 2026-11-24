@@ -85,6 +85,7 @@ void PpcJitLogRuntimeFallbacks(int frames) {
 
 static int g_compiledBlocks = 0;
 static int g_cacheClears = 0;
+static int g_invalCalls = 0;
 static u64 g_compileTicks = 0;
 static u64 g_firstCompileTick = 0;
 
@@ -115,16 +116,28 @@ void Jit::Compile(u32 em_address)
 {
 	PROFILE_THIS_SCOPE("jitc");
 #ifdef __wiiu__
-	// Two-tier JIT for Wii U's 1.78 MB RWX space: interpret cold blocks until they run
-	// kHotThreshold times. Tag each slot with em_address so aliasing never compiles cold blocks.
-	static const u8 kHotThreshold = 180;
+	// Adaptive tiered JIT for Wii U's 1.78 MB RWX space:
+	// - <65% full: low threshold (16) so hot loops compile immediately (minimal interpreter overhead).
+	// - 65-85% full: medium threshold (128) so only steady per-frame blocks take space.
+	// - >85% full: high threshold (1024) so lukewarm blocks stay interpreted instead of thrashing ClearCache().
+	const size_t spaceLeft = GetSpaceLeft();
+	u16 hotThreshold;
+	if (spaceLeft > 640 * 1024)
+		hotThreshold = 16;
+	else if (spaceLeft > 256 * 1024)
+		hotThreshold = 128;
+	else
+		hotThreshold = 1024;
+
 	u32 hidx = ((em_address >> 2) * 2654435761u) & (kHotTableSize - 1);
 	if (hotAddr_[hidx] != em_address) {
 		hotAddr_[hidx] = em_address;
 		hotCounts_[hidx] = 0;
 	}
-	if (hotCounts_[hidx] < kHotThreshold && !mips_->inDelaySlot) {
-		hotCounts_[hidx]++;
+	if (hotCounts_[hidx] < hotThreshold && !mips_->inDelaySlot) {
+		u64 interpT0 = OSGetSystemTime();
+		if (hotCounts_[hidx] < 65535)
+			hotCounts_[hidx]++;
 		int steps = 0;
 		while (coreState == CORE_RUNNING && (steps < 64 || mips_->inDelaySlot)) {
 			if (!mips_->inDelaySlot && steps > 0) {
@@ -140,6 +153,7 @@ void Jit::Compile(u32 em_address)
 			if (wasDelay || (!mips_->inDelaySlot && mips_->pc != prevPC + 4))
 				break;
 		}
+		g_gx2Perf.jitInterpTicks += OSGetSystemTime() - interpT0;
 		return;
 	}
 #endif
@@ -149,11 +163,14 @@ void Jit::Compile(u32 em_address)
 	if (GetSpaceLeft() < 0x4000 || blocks.IsFull())
 	{
 		g_cacheClears++;
+		int numBlocksBefore = blocks.GetNumBlocks();
+		int invalSinceClear = g_invalCalls;
+		g_invalCalls = 0;
 		u64 clearStart = OSGetSystemTime();
 		ClearCache();
 		int clearMs = (int)ticks_to_ms(OSGetSystemTime() - clearStart);
-		NOTICE_LOG(JIT, "Cleared JIT cache #%d in %d ms (blocks=%d, compile=%d ms of %d ms wall)",
-			g_cacheClears, clearMs, g_compiledBlocks,
+		NOTICE_LOG(JIT, "Cleared JIT cache #%d in %d ms (blocks=%d, cur=%d, inval=%d, compile=%d ms of %d ms wall)",
+			g_cacheClears, clearMs, g_compiledBlocks, numBlocksBefore, invalSinceClear,
 			(int)ticks_to_ms(g_compileTicks), g_firstCompileTick ? (int)ticks_to_ms(OSGetSystemTime() - g_firstCompileTick) : 0);
 	}
 
@@ -173,7 +190,11 @@ void Jit::Compile(u32 em_address)
 		// Let's try that one more time.  We won't get back here because we toggled the value.
 		Compile(em_address);
 	}
-	g_compileTicks += OSGetSystemTime() - compileStart;
+	u64 compileElapsed = OSGetSystemTime() - compileStart;
+	g_compileTicks += compileElapsed;
+#ifdef __wiiu__
+	g_gx2Perf.jitCompileTicks += compileElapsed;
+#endif
 }
 
 bool Jit::DescribeCodePtr(const u8 *ptr, std::string &name)
@@ -334,10 +355,10 @@ void Jit::ClearCache() {
 	ClearCodeSpace(0);
 	GenerateFixedCode();
 #ifdef __wiiu__
-	// Decay hotness instead of zeroing so truly hot blocks recompile faster after a clear
-	// while cold/lukewarm blocks stay interpreted.
-	for (size_t i = 0; i < sizeof(hotCounts_); ++i)
-		hotCounts_[i] >>= 1;
+	// Decay hotness instead of zeroing so truly hot blocks recompile immediately after a clear
+	// while lukewarm blocks stay interpreted.
+	for (size_t i = 0; i < kHotTableSize; ++i)
+		hotCounts_[i] >>= 2;
 #endif
 }
 
@@ -346,6 +367,7 @@ void Jit::InvalidateCache() {
 }
 
 void Jit::InvalidateCacheAt(u32 em_address, int length) {
+	g_invalCalls++;
 	blocks.InvalidateICache(em_address, length);
 }
 

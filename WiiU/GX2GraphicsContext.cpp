@@ -204,6 +204,9 @@ void GX2GraphicsContext::SwapBuffers() {
 		lastSwap = t2;
 		if (accCount >= 300) {
 			double jitMs = (double)ticks_to_us(g_gx2Perf.jitTicks) / (1000.0 * accCount);
+			double jitIntMs = (double)ticks_to_us(g_gx2Perf.jitInterpTicks) / (1000.0 * accCount);
+			double jitCmpMs = (double)ticks_to_us(g_gx2Perf.jitCompileTicks) / (1000.0 * accCount);
+			double hleMs = (double)ticks_to_us(g_gx2Perf.hleTicks) / (1000.0 * accCount);
 			double waitMs = (double)ticks_to_us(g_gx2Perf.cpuWaitTicks) / (1000.0 * accCount);
 			double geMs = (double)ticks_to_us(g_gx2Perf.geTicks) / (1000.0 * accCount);
 			double flushMs = (double)ticks_to_us(g_gx2Perf.flushTicks) / (1000.0 * accCount);
@@ -211,9 +214,9 @@ void GX2GraphicsContext::SwapBuffers() {
 			double stateMs = (double)ticks_to_us(g_gx2Perf.stateTicks) / (1000.0 * accCount);
 			double decMs = (double)ticks_to_us(g_gx2Perf.decTicks) / (1000.0 * accCount);
 			double uboMs = (double)ticks_to_us(g_gx2Perf.uboTicks) / (1000.0 * accCount);
-			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), core2 %.2f (work %.2f wait %.2f | s:%u/%u/%u/%u/%u), core1-ge %.2f (prim %.2f fl %.2f [st %.2f dec %.2f ubo %.2f]), draws %.1f",
+			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), core2 %.2f (work %.2f wait %.2f [int %.2f cmp %.2f hle %.2f] | s:%u/%u/%u/%u/%u), core1-ge %.2f (prim %.2f fl %.2f [st %.2f dec %.2f ubo %.2f]), draws %.1f",
 				accFrame * 1000.0 / accCount, accCount / accFrame,
-				jitMs, jitMs - waitMs, waitMs,
+				jitMs, jitMs - waitMs, waitMs, jitIntMs, jitCmpMs, hleMs,
 				g_gx2Perf.syncEnq / accCount, g_gx2Perf.syncWait / accCount, g_gx2Perf.syncInv / accCount,
 				g_gx2Perf.syncDisp / accCount, g_gx2Perf.syncOth / accCount,
 				geMs, primMs, flushMs, stateMs, decMs, uboMs,

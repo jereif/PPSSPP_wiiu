@@ -138,6 +138,9 @@ struct GX2PerfCounters {
 	u32 syncDisp;
 	u32 syncOth;
 	u64 jitTicks;
+	u64 jitInterpTicks;
+	u64 jitCompileTicks;
+	u64 hleTicks;
 	u64 cpuWaitTicks;
 	u64 geTicks;
 	u64 flushTicks;

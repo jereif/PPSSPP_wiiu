@@ -803,6 +803,27 @@ namespace MIPSComp
 		}
 	}
 
+	static void PpcVfpuVmmovHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		MatrixSize sz = GetMtxSize(op);
+		int n = GetMatrixSide(sz);
+		u8 sregs[16], dregs[16];
+		GetMatrixRegs(sregs, sz, _VS);
+		GetMatrixRegs(dregs, sz, _VD);
+		float * __restrict v = mips->v;
+		float tmp[16];
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				tmp[a * 4 + b] = v[voffset[sregs[a * 4 + b]]];
+			}
+		}
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				v[voffset[dregs[a * 4 + b]]] = tmp[a * 4 + b];
+			}
+		}
+	}
+
 	void Jit::Comp_Vmmov(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
 
@@ -822,6 +843,25 @@ namespace MIPSComp
 		u8 sregs[16], dregs[16];
 		GetMatrixRegs(sregs, sz, _VS);
 		GetMatrixRegs(dregs, sz, _VD);
+
+		// For 3x3 and 4x4, call compact helper (handles overlap too, saves ~140B RWX per vmmov.q).
+		if (n >= 3) {
+			for (int a = 0; a < n; a++) {
+				for (int b = 0; b < n; b++) {
+					fpr.FlushV(sregs[a * 4 + b]);
+				}
+			}
+			for (int a = 0; a < n; a++) {
+				for (int b = 0; b < n; b++) {
+					fpr.DiscardV(dregs[a * 4 + b]);
+				}
+			}
+			MR(R3, CTXREG);
+			MOVI2R(R4, op.encoding);
+			QuickCallFunction((void *)&PpcVfpuVmmovHelper);
+			fpr.ReleaseSpillLocksAndDiscardTemps();
+			return;
+		}
 
 		// Rough overlap check.
 		bool overlap = false;
@@ -903,6 +943,92 @@ namespace MIPSComp
 		GetMatrixRegs(dregs, sz, _VD);
 		float * __restrict v = mips->v;
 		if (n == 4) {
+#ifdef __wiiu__
+			// PowerPC 750CL Paired Singles 4x4 matrix multiply:
+			// scol[k*4 + b] = s[b*4 + k], t[a*4 + k] -> res[a*4 + b] = sum_k scol[k*4 + b] * t[a*4 + k].
+			alignas(8) float scol[16];
+			alignas(8) float t[16];
+			alignas(8) float res[16];
+			for (int a = 0; a < 4; a++) {
+				for (int b = 0; b < 4; b++) {
+					scol[b * 4 + a] = v[voffset[sregs[a * 4 + b]]];
+					t[a * 4 + b] = v[voffset[tregs[a * 4 + b]]];
+				}
+			}
+			asm volatile(
+				".machine push\n\t"
+				".machine gekko\n\t"
+				"psq_l   0,   0(%0), 0, 0\n\t"
+				"psq_l   1,   8(%0), 0, 0\n\t"
+				"psq_l   2,  16(%0), 0, 0\n\t"
+				"psq_l   3,  24(%0), 0, 0\n\t"
+				"psq_l   4,  32(%0), 0, 0\n\t"
+				"psq_l   5,  40(%0), 0, 0\n\t"
+				"psq_l   6,  48(%0), 0, 0\n\t"
+				"psq_l   7,  56(%0), 0, 0\n\t"
+				// Column 0
+				"psq_l   8,   0(%1), 0, 0\n\t"
+				"psq_l   9,   8(%1), 0, 0\n\t"
+				"ps_muls0  10, 0, 8\n\t"
+				"ps_muls0  11, 1, 8\n\t"
+				"ps_madds1 10, 2, 8, 10\n\t"
+				"ps_madds1 11, 3, 8, 11\n\t"
+				"ps_madds0 10, 4, 9, 10\n\t"
+				"ps_madds0 11, 5, 9, 11\n\t"
+				"ps_madds1 10, 6, 9, 10\n\t"
+				"ps_madds1 11, 7, 9, 11\n\t"
+				"psq_st  10,   0(%2), 0, 0\n\t"
+				"psq_st  11,   8(%2), 0, 0\n\t"
+				// Column 1
+				"psq_l   8,  16(%1), 0, 0\n\t"
+				"psq_l   9,  24(%1), 0, 0\n\t"
+				"ps_muls0  10, 0, 8\n\t"
+				"ps_muls0  11, 1, 8\n\t"
+				"ps_madds1 10, 2, 8, 10\n\t"
+				"ps_madds1 11, 3, 8, 11\n\t"
+				"ps_madds0 10, 4, 9, 10\n\t"
+				"ps_madds0 11, 5, 9, 11\n\t"
+				"ps_madds1 10, 6, 9, 10\n\t"
+				"ps_madds1 11, 7, 9, 11\n\t"
+				"psq_st  10,  16(%2), 0, 0\n\t"
+				"psq_st  11,  24(%2), 0, 0\n\t"
+				// Column 2
+				"psq_l   8,  32(%1), 0, 0\n\t"
+				"psq_l   9,  40(%1), 0, 0\n\t"
+				"ps_muls0  10, 0, 8\n\t"
+				"ps_muls0  11, 1, 8\n\t"
+				"ps_madds1 10, 2, 8, 10\n\t"
+				"ps_madds1 11, 3, 8, 11\n\t"
+				"ps_madds0 10, 4, 9, 10\n\t"
+				"ps_madds0 11, 5, 9, 11\n\t"
+				"ps_madds1 10, 6, 9, 10\n\t"
+				"ps_madds1 11, 7, 9, 11\n\t"
+				"psq_st  10,  32(%2), 0, 0\n\t"
+				"psq_st  11,  40(%2), 0, 0\n\t"
+				// Column 3
+				"psq_l   8,  48(%1), 0, 0\n\t"
+				"psq_l   9,  56(%1), 0, 0\n\t"
+				"ps_muls0  10, 0, 8\n\t"
+				"ps_muls0  11, 1, 8\n\t"
+				"ps_madds1 10, 2, 8, 10\n\t"
+				"ps_madds1 11, 3, 8, 11\n\t"
+				"ps_madds0 10, 4, 9, 10\n\t"
+				"ps_madds0 11, 5, 9, 11\n\t"
+				"ps_madds1 10, 6, 9, 10\n\t"
+				"ps_madds1 11, 7, 9, 11\n\t"
+				"psq_st  10,  48(%2), 0, 0\n\t"
+				"psq_st  11,  56(%2), 0, 0\n\t"
+				".machine pop\n\t"
+				:
+				: "b"(scol), "b"(t), "b"(res)
+				: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
+				  "fr8", "fr9", "fr10", "fr11", "memory");
+			for (int a = 0; a < 4; a++) {
+				for (int b = 0; b < 4; b++) {
+					v[voffset[dregs[a * 4 + b]]] = res[a * 4 + b];
+				}
+			}
+#else
 			float s[16], t[16];
 			for (int a = 0; a < 4; a++) {
 				for (int b = 0; b < 4; b++) {
@@ -921,6 +1047,7 @@ namespace MIPSComp
 						s[b * 4 + 2] * t2 + s[b * 4 + 3] * t3;
 				}
 			}
+#endif
 		} else {
 			float s[9], t[9];
 			for (int a = 0; a < 3; a++) {
@@ -1007,6 +1134,101 @@ namespace MIPSComp
 		DISABLE;
 	}
 
+	static void PpcVfpuVtfmHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		MatrixSize msz = GetMtxSize(op);
+		int n = GetNumVectorElements(sz);
+		int ins = (op >> 23) & 7;
+		bool homogenous = false;
+		if (n == ins) {
+			n++;
+			sz = (VectorSize)((int)(sz) + 1);
+			msz = (MatrixSize)((int)(msz) + 1);
+			homogenous = true;
+		}
+		u8 sregs[16], dregs[4], tregs[4];
+		GetMatrixRegs(sregs, msz, _VS);
+		GetVectorRegs(tregs, sz, _VT);
+		GetVectorRegs(dregs, sz, _VD);
+		float * __restrict v = mips->v;
+		if (n == 4) {
+#ifdef __wiiu__
+			alignas(8) float scol[16];
+			alignas(8) float t[4];
+			alignas(8) float res[4];
+			for (int i = 0; i < 4; i++) {
+				for (int k = 0; k < 4; k++) {
+					scol[k * 4 + i] = v[voffset[sregs[i * 4 + k]]];
+				}
+			}
+			t[0] = v[voffset[tregs[0]]];
+			t[1] = v[voffset[tregs[1]]];
+			t[2] = v[voffset[tregs[2]]];
+			t[3] = homogenous ? 1.0f : v[voffset[tregs[3]]];
+			asm volatile(
+				".machine push\n\t"
+				".machine gekko\n\t"
+				"psq_l   0,   0(%0), 0, 0\n\t"
+				"psq_l   1,   8(%0), 0, 0\n\t"
+				"psq_l   2,  16(%0), 0, 0\n\t"
+				"psq_l   3,  24(%0), 0, 0\n\t"
+				"psq_l   4,  32(%0), 0, 0\n\t"
+				"psq_l   5,  40(%0), 0, 0\n\t"
+				"psq_l   6,  48(%0), 0, 0\n\t"
+				"psq_l   7,  56(%0), 0, 0\n\t"
+				"psq_l   8,   0(%1), 0, 0\n\t"
+				"psq_l   9,   8(%1), 0, 0\n\t"
+				"ps_muls0  10, 0, 8\n\t"
+				"ps_muls0  11, 1, 8\n\t"
+				"ps_madds1 10, 2, 8, 10\n\t"
+				"ps_madds1 11, 3, 8, 11\n\t"
+				"ps_madds0 10, 4, 9, 10\n\t"
+				"ps_madds0 11, 5, 9, 11\n\t"
+				"ps_madds1 10, 6, 9, 10\n\t"
+				"ps_madds1 11, 7, 9, 11\n\t"
+				"psq_st  10,   0(%2), 0, 0\n\t"
+				"psq_st  11,   8(%2), 0, 0\n\t"
+				".machine pop\n\t"
+				:
+				: "b"(scol), "b"(t), "b"(res)
+				: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
+				  "fr8", "fr9", "fr10", "fr11", "memory");
+			for (int i = 0; i < 4; i++) {
+				v[voffset[dregs[i]]] = res[i];
+			}
+#else
+			float t0 = v[voffset[tregs[0]]];
+			float t1 = v[voffset[tregs[1]]];
+			float t2 = v[voffset[tregs[2]]];
+			float t3 = homogenous ? 1.0f : v[voffset[tregs[3]]];
+			float res[4];
+			for (int i = 0; i < 4; i++) {
+				res[i] = v[voffset[sregs[i * 4 + 0]]] * t0
+				       + v[voffset[sregs[i * 4 + 1]]] * t1
+				       + v[voffset[sregs[i * 4 + 2]]] * t2
+				       + v[voffset[sregs[i * 4 + 3]]] * t3;
+			}
+			for (int i = 0; i < 4; i++) {
+				v[voffset[dregs[i]]] = res[i];
+			}
+#endif
+		} else {
+			float t0 = v[voffset[tregs[0]]];
+			float t1 = v[voffset[tregs[1]]];
+			float t2 = homogenous ? 1.0f : v[voffset[tregs[2]]];
+			float res[3];
+			for (int i = 0; i < 3; i++) {
+				res[i] = v[voffset[sregs[i * 4 + 0]]] * t0
+				       + v[voffset[sregs[i * 4 + 1]]] * t1
+				       + v[voffset[sregs[i * 4 + 2]]] * t2;
+			}
+			for (int i = 0; i < 3; i++) {
+				v[voffset[dregs[i]]] = res[i];
+			}
+		}
+	}
+
 	void Jit::Comp_Vtfm(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
 
@@ -1036,6 +1258,26 @@ namespace MIPSComp
 		GetMatrixRegs(sregs, msz, _VS);
 		GetVectorRegs(tregs, sz, _VT);
 		GetVectorRegs(dregs, sz, _VD);
+
+		// For 3x3 and 4x4, call compact Paired-Singles helper (saves ~180B RWX and avoids 10+ FPR spills).
+		if (n >= 3) {
+			for (int i = 0; i < n; i++) {
+				for (int k = 0; k < n; k++) {
+					fpr.FlushV(sregs[i * 4 + k]);
+				}
+				if (!homogenous || i != n - 1) {
+					fpr.FlushV(tregs[i]);
+				}
+			}
+			for (int i = 0; i < n; i++) {
+				fpr.DiscardV(dregs[i]);
+			}
+			MR(R3, CTXREG);
+			MOVI2R(R4, op.encoding);
+			QuickCallFunction((void *)&PpcVfpuVtfmHelper);
+			fpr.ReleaseSpillLocksAndDiscardTemps();
+			return;
+		}
 
 		// TODO: test overlap, optimize.
 		int tempregs[4];

@@ -340,7 +340,7 @@ namespace MIPSComp
 #ifdef __wiiu__
 		static constexpr u32 kHotTableSize = 262144;
 		u32 hotAddr_[kHotTableSize];
-		u8 hotCounts_[kHotTableSize];
+		u16 hotCounts_[kHotTableSize];
 #endif
 	};
 	

@@ -286,9 +286,7 @@ void Jit::BranchVFPUFlag(MIPSOpcode op, PpcGen::FixupBranchType cc, bool likely)
 
 	int imm3 = (op >> 18) & 7;
 
-
-	MOVI2R(SREG,  (u32)&(mips_->vfpuCtrl[VFPU_CTRL_CC]));
-	LWZ(SREG, SREG, 0);
+	LWZ(SREG, CTXREG, offsetof(MIPSState, vfpuCtrl[VFPU_CTRL_CC]));
 	// change CR0
 	ANDI(SREG, SREG, 1 << imm3);
 

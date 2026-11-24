@@ -42,6 +42,10 @@
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/HLE.h"
+#ifdef __wiiu__
+#include <wiiu/os/time.h>
+#include "GPU/GX2/ShaderManagerGX2.h"
+#endif
 
 enum
 {
@@ -717,10 +721,18 @@ void CallSyscall(MIPSOpcode op)
 	if (info->func) {
 		if (op == idleOp)
 			info->func();
-		else if (info->flags != 0)
-			CallSyscallWithFlags(info);
-		else
-			CallSyscallWithoutFlags(info);
+		else {
+#ifdef __wiiu__
+			u64 hleT0 = OSGetSystemTime();
+#endif
+			if (info->flags != 0)
+				CallSyscallWithFlags(info);
+			else
+				CallSyscallWithoutFlags(info);
+#ifdef __wiiu__
+			g_gx2Perf.hleTicks += OSGetSystemTime() - hleT0;
+#endif
+		}
 	}
 	else {
 		RETURN(SCE_KERNEL_ERROR_LIBRARY_NOT_YET_LINKED);
