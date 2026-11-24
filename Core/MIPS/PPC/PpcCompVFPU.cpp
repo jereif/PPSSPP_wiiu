@@ -458,6 +458,10 @@ namespace MIPSComp
 
 	void Jit::Comp_VecDo3(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
+		if ((op >> 26) == 27 && ((op >> 23) & 7) == 5) {
+			Comp_Vscmp(op);
+			return;
+		}
 		
 		if (js.HasUnknownPrefix() || disablePrefixes) {
 			DISABLE;
@@ -1802,8 +1806,109 @@ namespace MIPSComp
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
+	static void PpcVfpuVrotHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		int imm = (op >> 16) & 0x1f;
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		bool negSin = (imm & 0x10) != 0;
+		int sineLane = (imm >> 2) & 3;
+		int cosineLane = imm & 3;
+		u8 sreg, dregs[4];
+		GetVectorRegs(&sreg, V_Single, _VS);
+		GetVectorRegs(dregs, sz, _VD);
+
+		float sine, cosine;
+		vfpu_sincos(mips->v[voffset[sreg]], sine, cosine);
+		if (negSin)
+			sine = -sine;
+
+		float d[4];
+		if (sineLane == cosineLane) {
+			for (int i = 0; i < n; i++)
+				d[i] = sine;
+		} else {
+			for (int i = 0; i < n; i++)
+				d[i] = 0.0f;
+			if (sineLane < n)
+				d[sineLane] = sine;
+		}
+		if (cosineLane < n)
+			d[cosineLane] = cosine;
+
+		for (int i = 0; i < n; i++)
+			mips->v[voffset[dregs[i]]] = d[i];
+	}
+
 	void Jit::Comp_VRot(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sreg, dregs[4];
+		GetVectorRegs(&sreg, V_Single, _VS);
+		GetVectorRegs(dregs, sz, _VD);
+		fpr.FlushV(sreg);
+		for (int i = 0; i < n; i++)
+			fpr.DiscardV(dregs[i]);
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVrotHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
+	}
+
+	static void PpcVfpuVscmpHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], tregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(tregs, sz, _VT);
+		GetVectorRegs(dregs, sz, _VD);
+		float out[4];
+		for (int i = 0; i < n; i++) {
+			float sf = mips->v[voffset[sregs[i]]];
+			float tf = mips->v[voffset[tregs[i]]];
+			float a = sf - tf;
+			if (my_isnan(a)) {
+				u32 su, tu;
+				memcpy(&su, &sf, 4);
+				memcpy(&tu, &tf, 4);
+				int sMag = (int)(su & 0x7FFFFFFFu);
+				int tMag = (int)(tu & 0x7FFFFFFFu);
+				int b = ((s32)su < 0 ? -sMag : sMag) - ((s32)tu < 0 ? -tMag : tMag);
+				out[i] = (float)((0 < b) - (b < 0));
+			} else {
+				out[i] = (float)((0.0f < a) - (a < 0.0f));
+			}
+		}
+		for (int i = 0; i < n; i++)
+			mips->v[voffset[dregs[i]]] = out[i];
+	}
+
+	void Jit::Comp_Vscmp(MIPSOpcode op) {
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], tregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(tregs, sz, _VT);
+		GetVectorRegs(dregs, sz, _VD);
+		for (int i = 0; i < n; i++) {
+			fpr.FlushV(sregs[i]);
+			fpr.FlushV(tregs[i]);
+		}
+		for (int i = 0; i < n; i++)
+			fpr.DiscardV(dregs[i]);
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVscmpHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Jit::Comp_VIdt(MIPSOpcode op) {

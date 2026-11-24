@@ -224,6 +224,7 @@ namespace MIPSComp
 		void Comp_VRot(MIPSOpcode op);
 		void Comp_VIdt(MIPSOpcode op);
 		void Comp_Vcmp(MIPSOpcode op);
+		void Comp_Vscmp(MIPSOpcode op);
 		void Comp_Vcmov(MIPSOpcode op);
 		void Comp_Viim(MIPSOpcode op);
 		void Comp_Vfim(MIPSOpcode op);

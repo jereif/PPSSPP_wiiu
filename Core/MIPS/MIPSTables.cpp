@@ -549,7 +549,11 @@ const MIPSInstruction tableVFPU3[8] = // 011011 xxx ....... . ....... . .......
 	INSTR("vmin", JITFUNC(Comp_VecDo3), Dis_VectorSet3, Int_Vminmax, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
 	INSTR("vmax", JITFUNC(Comp_VecDo3), Dis_VectorSet3, Int_Vminmax, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
 	INVALID,
+#if PPSSPP_ARCH(POWERPC)
+	INSTR("vscmp", JITFUNC(Comp_VecDo3), Dis_VectorSet3, Int_Vscmp, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
+#else
 	INSTR("vscmp", JITFUNC(Comp_Generic), Dis_VectorSet3, Int_Vscmp, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
+#endif
 	INSTR("vsge", JITFUNC(Comp_VecDo3), Dis_VectorSet3, Int_Vsge, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
 	INSTR("vslt", JITFUNC(Comp_VecDo3), Dis_VectorSet3, Int_Vslt, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
 };

@@ -38,6 +38,34 @@ using namespace PpcJitConstants;
 namespace MIPSComp
 {
 
+static u32 PpcMemLWL(u32 maskedAddr, u32 rtVal) {
+	u32 shift = (maskedAddr & 3) * 8;
+	u32 mem = Memory::ReadUnchecked_U32(maskedAddr & 0xFFFFFFFCu);
+	return (rtVal & (0x00FFFFFFu >> shift)) | (mem << (24 - shift));
+}
+
+static u32 PpcMemLWR(u32 maskedAddr, u32 rtVal) {
+	u32 shift = (maskedAddr & 3) * 8;
+	u32 mem = Memory::ReadUnchecked_U32(maskedAddr & 0xFFFFFFFCu);
+	return (rtVal & (0xFFFFFF00u << (24 - shift))) | (mem >> shift);
+}
+
+static void PpcMemSWL(u32 maskedAddr, u32 rtVal) {
+	u32 shift = (maskedAddr & 3) * 8;
+	u32 aligned = maskedAddr & 0xFFFFFFFCu;
+	u32 mem = Memory::ReadUnchecked_U32(aligned);
+	u32 result = (rtVal >> (24 - shift)) | (mem & (0xFFFFFF00u << shift));
+	Memory::WriteUnchecked_U32(result, aligned);
+}
+
+static void PpcMemSWR(u32 maskedAddr, u32 rtVal) {
+	u32 shift = (maskedAddr & 3) << 3;
+	u32 aligned = maskedAddr & 0xFFFFFFFCu;
+	u32 mem = Memory::ReadUnchecked_U32(aligned);
+	u32 result = (rtVal << shift) | (mem & (0x00FFFFFFu >> (24 - shift)));
+	Memory::WriteUnchecked_U32(result, aligned);
+}
+
 void Jit::SetRegToEffectiveAddress(PpcGen::PPCReg r, int rs, s16 offset) {
 	if (offset) {
 		ADDI(SREG, gpr.R(rs), offset);
@@ -142,8 +170,31 @@ void Jit::Comp_ITypeMem(MIPSOpcode op) {
 					return;
 				}
 			}
-
-			DISABLE; // Disabled until crashes are resolved.
+			{
+				// Fast leaf helper (preserves all cached GPRs/FPRs in R14..R31/FPR14..FPR31).
+				if (gpr.IsImm(rs) && Memory::IsValidAddress(iaddr)) {
+					gpr.MapReg(rt, load ? MAP_DIRTY : 0);
+					MOVI2R(R3, iaddr & 0x3FFFFFFF);
+				} else {
+					gpr.MapInIn(rt, rs);
+					if (load)
+						gpr.MapReg(rt, MAP_DIRTY);
+					SetRegToEffectiveAddress(SREG, rs, offset);
+					MR(R3, SREG);
+				}
+				MR(R4, gpr.R(rt));
+				if (o == 34) {
+					QuickCallFunction((void *)&PpcMemLWL);
+					MR(gpr.R(rt), R3);
+				} else if (o == 38) {
+					QuickCallFunction((void *)&PpcMemLWR);
+					MR(gpr.R(rt), R3);
+				} else if (o == 42) {
+					QuickCallFunction((void *)&PpcMemSWL);
+				} else {
+					QuickCallFunction((void *)&PpcMemSWR);
+				}
+			}
 			break;
 		default:
 			Comp_Generic(op);

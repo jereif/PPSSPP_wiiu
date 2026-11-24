@@ -267,6 +267,79 @@ void VertexDecoder::Step_WeightsFloat() const
 }
 
 void VertexDecoder::ComputeSkinMatrix(const float weights[8]) const {
+#ifdef __wiiu__
+	bool first = true;
+	for (int j = 0; j < nweights; j++) {
+		const float w = weights[j];
+		if (w != 0.0f) {
+			const float *bone = &gstate.boneMatrix[j * 12];
+			if (first) {
+				first = false;
+				asm volatile(
+					".machine push\n\t"
+					".machine gekko\n\t"
+					"psq_l   0,  0(%0), 0, 0\n\t"
+					"psq_l   1,  8(%0), 0, 0\n\t"
+					"psq_l   2, 16(%0), 0, 0\n\t"
+					"psq_l   3, 24(%0), 0, 0\n\t"
+					"psq_l   4, 32(%0), 0, 0\n\t"
+					"psq_l   5, 40(%0), 0, 0\n\t"
+					"ps_muls0 0, 0, %2\n\t"
+					"ps_muls0 1, 1, %2\n\t"
+					"ps_muls0 2, 2, %2\n\t"
+					"ps_muls0 3, 3, %2\n\t"
+					"ps_muls0 4, 4, %2\n\t"
+					"ps_muls0 5, 5, %2\n\t"
+					"psq_st  0,  0(%1), 0, 0\n\t"
+					"psq_st  1,  8(%1), 0, 0\n\t"
+					"psq_st  2, 16(%1), 0, 0\n\t"
+					"psq_st  3, 24(%1), 0, 0\n\t"
+					"psq_st  4, 32(%1), 0, 0\n\t"
+					"psq_st  5, 40(%1), 0, 0\n\t"
+					".machine pop\n\t"
+					:
+					: "b"(bone), "b"(skinMatrix), "f"(w)
+					: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "memory");
+			} else {
+				asm volatile(
+					".machine push\n\t"
+					".machine gekko\n\t"
+					"psq_l   0,  0(%0), 0, 0\n\t"
+					"psq_l   1,  8(%0), 0, 0\n\t"
+					"psq_l   2, 16(%0), 0, 0\n\t"
+					"psq_l   3, 24(%0), 0, 0\n\t"
+					"psq_l   4, 32(%0), 0, 0\n\t"
+					"psq_l   5, 40(%0), 0, 0\n\t"
+					"psq_l   6,  0(%1), 0, 0\n\t"
+					"psq_l   7,  8(%1), 0, 0\n\t"
+					"psq_l   8, 16(%1), 0, 0\n\t"
+					"psq_l   9, 24(%1), 0, 0\n\t"
+					"psq_l  10, 32(%1), 0, 0\n\t"
+					"psq_l  11, 40(%1), 0, 0\n\t"
+					"ps_madds0 6, 0, %2, 6\n\t"
+					"ps_madds0 7, 1, %2, 7\n\t"
+					"ps_madds0 8, 2, %2, 8\n\t"
+					"ps_madds0 9, 3, %2, 9\n\t"
+					"ps_madds0 10, 4, %2, 10\n\t"
+					"ps_madds0 11, 5, %2, 11\n\t"
+					"psq_st  6,  0(%1), 0, 0\n\t"
+					"psq_st  7,  8(%1), 0, 0\n\t"
+					"psq_st  8, 16(%1), 0, 0\n\t"
+					"psq_st  9, 24(%1), 0, 0\n\t"
+					"psq_st 10, 32(%1), 0, 0\n\t"
+					"psq_st 11, 40(%1), 0, 0\n\t"
+					".machine pop\n\t"
+					:
+					: "b"(bone), "b"(skinMatrix), "f"(w)
+					: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5",
+					  "fr6", "fr7", "fr8", "fr9", "fr10", "fr11", "memory");
+			}
+		}
+	}
+	if (first) {
+		memset(skinMatrix, 0, sizeof(skinMatrix));
+	}
+#else
 	memset(skinMatrix, 0, sizeof(skinMatrix));
 	for (int j = 0; j < nweights; j++) {
 		const float *bone = &gstate.boneMatrix[j * 12];
@@ -276,21 +349,24 @@ void VertexDecoder::ComputeSkinMatrix(const float weights[8]) const {
 			}
 		}
 	}
+#endif
 }
 
 void VertexDecoder::Step_WeightsU8Skin() const {
 	const u8 *wdata = (const u8*)(ptr_);
 	float weights[8];
 	for (int j = 0; j < nweights; j++)
-		weights[j] = wdata[j] * (1.0f / 128.0f);
+		weights[j] = wdata[j] ? (wdata[j] * (1.0f / 128.0f)) : 0.0f;
 	ComputeSkinMatrix(weights);
 }
 
 void VertexDecoder::Step_WeightsU16Skin() const {
 	const u16_le *wdata = (const u16_le*)(ptr_);
 	float weights[8];
-	for (int j = 0; j < nweights; j++)
-		weights[j] = wdata[j] * (1.0f / 32768.0f);
+	for (int j = 0; j < nweights; j++) {
+		u16 w = wdata[j];
+		weights[j] = w ? (w * (1.0f / 32768.0f)) : 0.0f;
+	}
 	ComputeSkinMatrix(weights);
 }
 
