@@ -373,9 +373,40 @@ void Jit::Comp_FPU2op(MIPSOpcode op) {
 		FNEG(fpr.R(fd), fpr.R(fs));
 		break;
 
+	case 12: //	FsI(fd) = (int)round_ieee_754(F(fs));							break;	//round.w.s
+		fpr.MapReg(fs);
+		FCTIW(FPR6, fpr.R(fs));
+		SFD(FPR6, R1, 16);
+		fpr.FlushR(fd);
+		LWZ(SREG, R1, 20);
+		STW(SREG, CTXREG, fpr.GetMipsRegOffset(fd));
+		break;
+
 	case 13: //	FsI(fd) = F(fs)>=0 ? (int)floorf(F(fs)) : (int)ceilf(F(fs));	break;	//trunc.w.s
 		fpr.MapReg(fs);
 		FCTIWZ(FPR6, fpr.R(fs));
+		SFD(FPR6, R1, 16);
+		fpr.FlushR(fd);
+		LWZ(SREG, R1, 20);
+		STW(SREG, CTXREG, fpr.GetMipsRegOffset(fd));
+		break;
+
+	case 14: //	FsI(fd) = (int)ceilf (F(fs));									break;	//ceil.w.s
+		fpr.MapReg(fs);
+		MTFSFI(7, 2); // Round toward +Infinity
+		FCTIW(FPR6, fpr.R(fs));
+		MTFSFI(7, 0); // Restore round-to-nearest
+		SFD(FPR6, R1, 16);
+		fpr.FlushR(fd);
+		LWZ(SREG, R1, 20);
+		STW(SREG, CTXREG, fpr.GetMipsRegOffset(fd));
+		break;
+
+	case 15: //	FsI(fd) = (int)floorf(F(fs));									break;	//floor.w.s
+		fpr.MapReg(fs);
+		MTFSFI(7, 3); // Round toward -Infinity
+		FCTIW(FPR6, fpr.R(fs));
+		MTFSFI(7, 0); // Restore round-to-nearest
 		SFD(FPR6, R1, 16);
 		fpr.FlushR(fd);
 		LWZ(SREG, R1, 20);

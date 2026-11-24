@@ -135,7 +135,6 @@ using namespace PpcJitConstants;
 				PPCReg ppc_rt = gpr.R(rt);
 				PPCReg ppc_rs = gpr.R(rs);
 
-				MOVI2R(R0, 0);
 				ADDI(SREG, R0, uimm);
 
 				SUBFC(R0, SREG, ppc_rs);
@@ -281,28 +280,116 @@ using namespace PpcJitConstants;
 		case 32: //R(rd) = R(rs) + R(rt);           break; //add
 		case 33: //R(rd) = R(rs) + R(rt);           break; //addu
 			// Some optimized special cases
-			if (gpr.IsImm(rs) && gpr.GetImm(rs) == 0) {
-				gpr.MapDirtyIn(rd, rt);
-				MR(gpr.R(rd), gpr.R(rt));
-			} else if (gpr.IsImm(rt) && gpr.GetImm(rt) == 0) {
-				gpr.MapDirtyIn(rd, rs);
-				MR(gpr.R(rd), gpr.R(rs));
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rs) + gpr.GetImm(rt));
+			} else if (gpr.IsImm(rs) && (s32)gpr.GetImm(rs) >= -32768 && (s32)gpr.GetImm(rs) <= 32767) {
+				s32 imm = (s32)gpr.GetImm(rs);
+				if (imm == 0) {
+					if (rd != rt) {
+						gpr.MapDirtyIn(rd, rt);
+						MR(gpr.R(rd), gpr.R(rt));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rt);
+					ADDI(gpr.R(rd), gpr.R(rt), imm);
+				}
+			} else if (gpr.IsImm(rt) && (s32)gpr.GetImm(rt) >= -32768 && (s32)gpr.GetImm(rt) <= 32767) {
+				s32 imm = (s32)gpr.GetImm(rt);
+				if (imm == 0) {
+					if (rd != rs) {
+						gpr.MapDirtyIn(rd, rs);
+						MR(gpr.R(rd), gpr.R(rs));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rs);
+					ADDI(gpr.R(rd), gpr.R(rs), imm);
+				}
 			} else {
 				CompType3(rd, rs, rt, &PPCXEmitter::ADD, &EvalAdd);
 			}
 			break;
 		case 34: //R(rd) = R(rs) - R(rt);           break; //sub
 		case 35: //R(rd) = R(rs) - R(rt);           break; //subu
-			CompType3(rd, rs, rt, &PPCXEmitter::SUB, &EvalSub, true);
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rs) - gpr.GetImm(rt));
+			} else if (gpr.IsImm(rt) && gpr.GetImm(rt) == 0) {
+				if (rd != rs) {
+					gpr.MapDirtyIn(rd, rs);
+					MR(gpr.R(rd), gpr.R(rs));
+				}
+			} else if (gpr.IsImm(rs) && gpr.GetImm(rs) == 0) {
+				gpr.MapDirtyIn(rd, rt);
+				NEG(gpr.R(rd), gpr.R(rt));
+			} else {
+				CompType3(rd, rs, rt, &PPCXEmitter::SUB, &EvalSub, true);
+			}
 			break;
 		case 36: //R(rd) = R(rs) & R(rt);           break; //and
-			CompType3(rd, rs, rt, &PPCXEmitter::AND, &EvalAnd);
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rs) & gpr.GetImm(rt));
+			} else if ((gpr.IsImm(rs) && gpr.GetImm(rs) == 0) || (gpr.IsImm(rt) && gpr.GetImm(rt) == 0)) {
+				gpr.SetImm(rd, 0);
+			} else {
+				CompType3(rd, rs, rt, &PPCXEmitter::AND, &EvalAnd);
+			}
 			break;
 		case 37: //R(rd) = R(rs) | R(rt);           break; //or
-			CompType3(rd, rs, rt, &PPCXEmitter::OR, &EvalOr);
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rs) | gpr.GetImm(rt));
+			} else if (gpr.IsImm(rt) && gpr.GetImm(rt) <= 0xFFFF) {
+				u32 imm = gpr.GetImm(rt);
+				if (imm == 0) {
+					if (rd != rs) {
+						gpr.MapDirtyIn(rd, rs);
+						MR(gpr.R(rd), gpr.R(rs));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rs);
+					ORI(gpr.R(rd), gpr.R(rs), (u16)imm);
+				}
+			} else if (gpr.IsImm(rs) && gpr.GetImm(rs) <= 0xFFFF) {
+				u32 imm = gpr.GetImm(rs);
+				if (imm == 0) {
+					if (rd != rt) {
+						gpr.MapDirtyIn(rd, rt);
+						MR(gpr.R(rd), gpr.R(rt));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rt);
+					ORI(gpr.R(rd), gpr.R(rt), (u16)imm);
+				}
+			} else {
+				CompType3(rd, rs, rt, &PPCXEmitter::OR, &EvalOr);
+			}
 			break;
 		case 38: //R(rd) = R(rs) ^ R(rt);           break; //xor/eor	
-			CompType3(rd, rs, rt, &PPCXEmitter::XOR, &EvalXor);
+			if (gpr.IsImm(rs) && gpr.IsImm(rt)) {
+				gpr.SetImm(rd, gpr.GetImm(rs) ^ gpr.GetImm(rt));
+			} else if (gpr.IsImm(rt) && gpr.GetImm(rt) <= 0xFFFF) {
+				u32 imm = gpr.GetImm(rt);
+				if (imm == 0) {
+					if (rd != rs) {
+						gpr.MapDirtyIn(rd, rs);
+						MR(gpr.R(rd), gpr.R(rs));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rs);
+					XORI(gpr.R(rd), gpr.R(rs), (u16)imm);
+				}
+			} else if (gpr.IsImm(rs) && gpr.GetImm(rs) <= 0xFFFF) {
+				u32 imm = gpr.GetImm(rs);
+				if (imm == 0) {
+					if (rd != rt) {
+						gpr.MapDirtyIn(rd, rt);
+						MR(gpr.R(rd), gpr.R(rt));
+					}
+				} else {
+					gpr.MapDirtyIn(rd, rt);
+					XORI(gpr.R(rd), gpr.R(rt), (u16)imm);
+				}
+			} else {
+				CompType3(rd, rs, rt, &PPCXEmitter::XOR, &EvalXor);
+			}
 			break;
 			// Not tested !
 		case 39: // R(rd) = ~(R(rs) | R(rt));       break; //nor

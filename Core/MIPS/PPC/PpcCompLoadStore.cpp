@@ -107,47 +107,60 @@ void Jit::Comp_ITypeMem(MIPSOpcode op) {
 		case 41: //sh
 		case 43: //sw
 
-			if (gpr.IsImm(rs) && Memory::IsValidAddress(iaddr)) {
+			PPCReg valReg;
+			if (!load && rt == 0) {
+				// Avoid wasting a cached host GPR slot just to hold $zero on stores.
+				if (gpr.IsImm(rs) && Memory::IsValidAddress(iaddr)) {
+					MOVI2R(SREG, iaddr & 0x3FFFFFFF);
+				} else {
+					gpr.MapReg(rs);
+					SetRegToEffectiveAddress(SREG, rs, offset);
+				}
+				MOVI2R(R6, 0);
+				valReg = R6;
+			} else if (gpr.IsImm(rs) && Memory::IsValidAddress(iaddr)) {
 				// We can compute the full address at compile time. Kickass.
 				u32 addr = iaddr & 0x3FFFFFFF;
 				// Must be OK even if rs == rt since we have the value from imm already.
 				gpr.MapReg(rt, load ? MAP_NOINIT | MAP_DIRTY : 0);
 				MOVI2R(SREG, addr);
+				valReg = gpr.R(rt);
 			} else {
 				_dbg_assert_msg_(!gpr.IsImm(rs), "Invalid immediate address?  CPU bug?");
 				load ? gpr.MapDirtyIn(rt, rs) : gpr.MapInIn(rt, rs);
 				
 				SetRegToEffectiveAddress(SREG, rs, offset);
+				valReg = gpr.R(rt);
 			}
 			switch (o)
 			{
 			// Load
 			case 32:  //lb
-				LBZX(gpr.R(rt), BASEREG, SREG); 
-				EXTSB(gpr.R(rt), gpr.R(rt));
+				LBZX(valReg, BASEREG, SREG); 
+				EXTSB(valReg, valReg);
 				break;
 			case 33:  //lh
-				LHBRX(gpr.R(rt), BASEREG, SREG); 
-				EXTSH(gpr.R(rt), gpr.R(rt));
+				LHBRX(valReg, BASEREG, SREG); 
+				EXTSH(valReg, valReg);
 				break;
 			case 35: //lw
-				LWBRX(gpr.R(rt), BASEREG, SREG); 
+				LWBRX(valReg, BASEREG, SREG); 
 				break;
 			case 36: //lbu
-				LBZX (gpr.R(rt), BASEREG, SREG); 
+				LBZX (valReg, BASEREG, SREG); 
 				break;
 			case 37: //lhu
-				LHBRX (gpr.R(rt), BASEREG, SREG); 
+				LHBRX (valReg, BASEREG, SREG); 
 				break;
 			// Store
 			case 40:  //sb
-				STBX (gpr.R(rt), BASEREG, SREG); 
+				STBX (valReg, BASEREG, SREG); 
 				break;
 			case 41: //sh
-				STHBRX(gpr.R(rt), BASEREG, SREG); 		
+				STHBRX(valReg, BASEREG, SREG); 		
 				break;
 			case 43: //sw
-				STWBRX(gpr.R(rt), BASEREG, SREG); 
+				STWBRX(valReg, BASEREG, SREG); 
 				break;
 			}
 			break;

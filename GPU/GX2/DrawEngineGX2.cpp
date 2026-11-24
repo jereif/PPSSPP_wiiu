@@ -255,10 +255,11 @@ GX2FetchShader *DrawEngineGX2::SetupFetchShaderForDraw(GX2VertexShader *vshader,
 void DrawEngineGX2::MarkUnreliable(VertexArrayInfoGX2 *vai) {
 	vai->status = VertexArrayInfoGX2::VAI_UNRELIABLE;
 
-	MEM2_free(vai->vbo);
-	vai->vbo = nullptr;
-
-	MEM2_free(vai->ebo);
+	if (vai->vbo) {
+		MEM2_free(vai->vbo);
+		vai->vbo = nullptr;
+	}
+	// ebo is packed inside the same allocation as vbo.
 	vai->ebo = nullptr;
 }
 
@@ -371,8 +372,9 @@ void DrawEngineGX2::BeginFrame() {
 }
 
 VertexArrayInfoGX2::~VertexArrayInfoGX2() {
-	MEM2_free(vbo);
-	MEM2_free(ebo);
+	if (vbo)
+		MEM2_free(vbo);
+	// ebo is packed inside the same allocation as vbo.
 }
 
 static u32 SwapRB(u32 c) { return (c & 0xFF00FF00) | ((c >> 16) & 0xFF) | ((c << 16) & 0xFF0000); }
@@ -521,6 +523,14 @@ void DrawEngineGX2::DoFlush() {
 				}
 
 				if (vai->vbo == 0) {
+					if (vai->numFrames < 4) {
+						// Prove the buffer is static for 4 frames before paying for MEM2_alloc + GX2Invalidate GPU sync.
+						vai->lastFrame = gpuStats.numFlips;
+						u64 v0 = OSGetSystemTime();
+						decodeUncached();
+						g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
+						goto rotateVBO;
+					}
 					u64 v0 = OSGetSystemTime();
 					DecodeVerts(decoded);
 					g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
@@ -535,19 +545,20 @@ void DrawEngineGX2::DoFlush() {
 
 					_dbg_assert_msg_(gstate_c.vertBounds.minV >= gstate_c.vertBounds.maxV, "Should not have checked UVs when caching.");
 
-					// TODO: Combine these two into one buffer?
-					u32 size = dec_->GetDecVtxFmt().stride * (indexGen.MaxIndex() + 1);
-					vai->vbo = MEM2_alloc(size, GX2_VERTEX_BUFFER_ALIGNMENT);
-					memcpy(vai->vbo, decoded, size);
-					GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, vai->vbo, size);
+					// Pack VBO and optional EBO into a single MEM2 allocation + single GX2Invalidate.
+					u32 vboSize = dec_->GetDecVtxFmt().stride * (indexGen.MaxIndex() + 1);
+					u32 eboOffset = alignup(vboSize, GX2_INDEX_BUFFER_ALIGNMENT);
+					u32 eboSize = useElements ? (sizeof(short) * indexGen.VertexCount()) : 0;
+					u32 totalSize = useElements ? (eboOffset + eboSize) : vboSize;
+					vai->vbo = MEM2_alloc(totalSize, GX2_VERTEX_BUFFER_ALIGNMENT);
+					memcpy(vai->vbo, decoded, vboSize);
 					if (useElements) {
-						u32 size = sizeof(short) * indexGen.VertexCount();
-						vai->ebo = MEM2_alloc(size, GX2_INDEX_BUFFER_ALIGNMENT);
-						memcpy(vai->ebo, decIndex, size);
-						GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, vai->ebo, size);
+						vai->ebo = (u8 *)vai->vbo + eboOffset;
+						memcpy(vai->ebo, decIndex, eboSize);
 					} else {
 						vai->ebo = 0;
 					}
+					GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, vai->vbo, totalSize);
 				} else {
 					gpuStats.numCachedDrawCalls++;
 					useElements = vai->ebo ? true : false;

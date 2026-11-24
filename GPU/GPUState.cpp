@@ -192,9 +192,18 @@ void GPUgstate::FastLoadBoneMatrix(u32 addr) {
 	vst1q_u32(dst + 4, row2);
 	vst1q_u32(dst + 8, row3);
 #else
-	for (int i = 0; i < 12; i++) {
-		dst[i] = src[i] << 8;
-	}
+	dst[0]  = src[0]  << 8;
+	dst[1]  = src[1]  << 8;
+	dst[2]  = src[2]  << 8;
+	dst[3]  = src[3]  << 8;
+	dst[4]  = src[4]  << 8;
+	dst[5]  = src[5]  << 8;
+	dst[6]  = src[6]  << 8;
+	dst[7]  = src[7]  << 8;
+	dst[8]  = src[8]  << 8;
+	dst[9]  = src[9]  << 8;
+	dst[10] = src[10] << 8;
+	dst[11] = src[11] << 8;
 #endif
 
 	num += 12;

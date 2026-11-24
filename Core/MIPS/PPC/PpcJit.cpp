@@ -123,12 +123,12 @@ void Jit::Compile(u32 em_address)
 	// - >85% full: high threshold (1024) so lukewarm blocks stay interpreted instead of thrashing ClearCache().
 	const size_t spaceLeft = GetSpaceLeft();
 	u16 hotThreshold;
-	if (spaceLeft > 640 * 1024)
+	if (spaceLeft > 320 * 1024)
 		hotThreshold = 16;
-	else if (spaceLeft > 256 * 1024)
-		hotThreshold = 128;
+	else if (spaceLeft > 128 * 1024)
+		hotThreshold = 64;
 	else
-		hotThreshold = 1024;
+		hotThreshold = 384;
 
 	u32 hidx = ((em_address >> 2) * 2654435761u) & (kHotTableSize - 1);
 	if (hotAddr_[hidx] != em_address) {
