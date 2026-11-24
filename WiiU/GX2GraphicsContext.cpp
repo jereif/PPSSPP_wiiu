@@ -213,13 +213,16 @@ void GX2GraphicsContext::SwapBuffers() {
 			double primMs = (double)ticks_to_us(g_gx2Perf.primTicks) / (1000.0 * accCount);
 			double stateMs = (double)ticks_to_us(g_gx2Perf.stateTicks) / (1000.0 * accCount);
 			double decMs = (double)ticks_to_us(g_gx2Perf.decTicks) / (1000.0 * accCount);
+			double hashMs = (double)ticks_to_us(g_gx2Perf.hashTicks) / (1000.0 * accCount);
+			double vdecMs = (double)ticks_to_us(g_gx2Perf.vdecTicks) / (1000.0 * accCount);
+			double drawMs = (double)ticks_to_us(g_gx2Perf.drawTicks) / (1000.0 * accCount);
 			double uboMs = (double)ticks_to_us(g_gx2Perf.uboTicks) / (1000.0 * accCount);
-			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), core2 %.2f (work %.2f wait %.2f [int %.2f cmp %.2f hle %.2f] | s:%u/%u/%u/%u/%u), core1-ge %.2f (prim %.2f fl %.2f [st %.2f dec %.2f ubo %.2f]), draws %.1f (sw %.1f)",
+			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), core2 %.2f (work %.2f wait %.2f [int %.2f cmp %.2f hle %.2f] | s:%u/%u/%u/%u/%u), core1-ge %.2f (prim %.2f fl %.2f [st %.2f dec %.2f(h %.2f v %.2f) ubo %.2f dr %.2f]), draws %.1f (sw %.1f)",
 				accFrame * 1000.0 / accCount, accCount / accFrame,
 				jitMs, jitMs - waitMs, waitMs, jitIntMs, jitCmpMs, hleMs,
 				g_gx2Perf.syncEnq / accCount, g_gx2Perf.syncWait / accCount, g_gx2Perf.syncInv / accCount,
 				g_gx2Perf.syncDisp / accCount, g_gx2Perf.syncOth / accCount,
-				geMs, primMs, flushMs, stateMs, decMs, uboMs,
+				geMs, primMs, flushMs, stateMs, decMs, hashMs, vdecMs, uboMs, drawMs,
 				(double)g_gx2Perf.draws / accCount, (double)g_gx2Perf.swDraws / accCount);
 			MIPSComp::PpcJitLogRuntimeFallbacks(accCount);
 			accFrame = accFlip = 0.0;

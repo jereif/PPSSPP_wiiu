@@ -619,7 +619,7 @@ inline u32 ComputeMiniHashRange(const void *ptr, size_t sz) {
 
 u32 DrawEngineCommon::ComputeMiniHash() {
 	u32 fullhash = 0;
-	const int vertexSize = dec_->GetDecVtxFmt().stride;
+	const int vertexSize = dec_->VertexSize();
 	const int indexSize = IndexSize(dec_->VertexType());
 
 	int step;
@@ -636,7 +636,7 @@ u32 DrawEngineCommon::ComputeMiniHash() {
 			fullhash += ComputeMiniHashRange(dc.verts, vertexSize * dc.vertexCount);
 		} else {
 			int indexLowerBound = dc.indexLowerBound, indexUpperBound = dc.indexUpperBound;
-			fullhash += ComputeMiniHashRange((const u8 *)dc.verts + vertexSize * indexLowerBound, vertexSize * (indexUpperBound - indexLowerBound));
+			fullhash += ComputeMiniHashRange((const u8 *)dc.verts + vertexSize * indexLowerBound, vertexSize * (indexUpperBound - indexLowerBound + 1));
 			fullhash += ComputeMiniHashRange(dc.inds, indexSize * dc.vertexCount);
 		}
 	}
@@ -646,7 +646,7 @@ u32 DrawEngineCommon::ComputeMiniHash() {
 
 uint64_t DrawEngineCommon::ComputeHash() {
 	uint64_t fullhash = 0;
-	const int vertexSize = dec_->GetDecVtxFmt().stride;
+	const int vertexSize = dec_->VertexSize();
 	const int indexSize = IndexSize(dec_->VertexType());
 
 	// TODO: Add some caps both for numDrawCalls and num verts to check?
@@ -662,15 +662,15 @@ uint64_t DrawEngineCommon::ComputeHash() {
 			while (j < numDrawCalls) {
 				if (drawCalls[j].verts != dc.verts)
 					break;
-				indexLowerBound = std::min(indexLowerBound, (int)dc.indexLowerBound);
-				indexUpperBound = std::max(indexUpperBound, (int)dc.indexUpperBound);
+				indexLowerBound = std::min(indexLowerBound, (int)drawCalls[j].indexLowerBound);
+				indexUpperBound = std::max(indexUpperBound, (int)drawCalls[j].indexUpperBound);
 				lastMatch = j;
 				j++;
 			}
 			// This could get seriously expensive with sparse indices. Need to combine hashing ranges the same way
 			// we do when drawing.
 			fullhash += XXH3_64bits((const char *)dc.verts + vertexSize * indexLowerBound,
-				vertexSize * (indexUpperBound - indexLowerBound));
+				vertexSize * (indexUpperBound - indexLowerBound + 1));
 			// Hm, we will miss some indices when combining above, but meh, it should be fine.
 			fullhash += XXH3_64bits((const char *)dc.inds, indexSize * dc.vertexCount);
 			i = lastMatch;

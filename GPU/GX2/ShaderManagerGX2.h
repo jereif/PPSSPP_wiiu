@@ -147,6 +147,9 @@ struct GX2PerfCounters {
 	u64 primTicks;
 	u64 stateTicks;
 	u64 decTicks;
+	u64 hashTicks;
+	u64 vdecTicks;
+	u64 drawTicks;
 	u64 uboTicks;
 };
 extern GX2PerfCounters g_gx2Perf;

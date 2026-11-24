@@ -458,12 +458,16 @@ void DrawEngineGX2::DoFlush() {
 			switch (vai->status) {
 			case VertexArrayInfoGX2::VAI_NEW: {
 				// Haven't seen this one before.
+				u64 h0 = OSGetSystemTime();
 				uint64_t dataHash = ComputeHash();
 				vai->hash = dataHash;
 				vai->minihash = ComputeMiniHash();
+				g_gx2Perf.hashTicks += OSGetSystemTime() - h0;
 				vai->status = VertexArrayInfoGX2::VAI_HASHING;
 				vai->drawsUntilNextFullHash = 0;
+				u64 v0 = OSGetSystemTime();
 				decodeUncached(); // writes to indexGen
+				g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
 				vai->numVerts = indexGen.VertexCount();
 				vai->prim = indexGen.Prim();
 				vai->maxIndex = indexGen.MaxIndex();
@@ -481,14 +485,18 @@ void DrawEngineGX2::DoFlush() {
 				}
 				if (vai->drawsUntilNextFullHash == 0) {
 					// Let's try to skip a full hash if mini would fail.
+					u64 h0 = OSGetSystemTime();
 					const u32 newMiniHash = ComputeMiniHash();
 					uint64_t newHash = vai->hash;
 					if (newMiniHash == vai->minihash) {
 						newHash = ComputeHash();
 					}
+					g_gx2Perf.hashTicks += OSGetSystemTime() - h0;
 					if (newMiniHash != vai->minihash || newHash != vai->hash) {
 						MarkUnreliable(vai);
+						u64 v0 = OSGetSystemTime();
 						DecodeVerts(decoded);
+						g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
 						goto rotateVBO;
 					}
 					if (vai->numVerts > 64) {
@@ -500,16 +508,22 @@ void DrawEngineGX2::DoFlush() {
 					}
 				} else {
 					vai->drawsUntilNextFullHash--;
+					u64 h0 = OSGetSystemTime();
 					u32 newMiniHash = ComputeMiniHash();
+					g_gx2Perf.hashTicks += OSGetSystemTime() - h0;
 					if (newMiniHash != vai->minihash) {
 						MarkUnreliable(vai);
+						u64 v0 = OSGetSystemTime();
 						DecodeVerts(decoded);
+						g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
 						goto rotateVBO;
 					}
 				}
 
 				if (vai->vbo == 0) {
+					u64 v0 = OSGetSystemTime();
 					DecodeVerts(decoded);
+					g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
 					vai->numVerts = indexGen.VertexCount();
 					vai->prim = indexGen.Prim();
 					vai->maxIndex = indexGen.MaxIndex();
@@ -539,7 +553,7 @@ void DrawEngineGX2::DoFlush() {
 					useElements = vai->ebo ? true : false;
 					gpuStats.numCachedVertsDrawn += vai->numVerts;
 					gstate_c.vertexFullAlpha = vai->flags & VAI11_FLAG_VERTEXFULLALPHA;
-					if (vai->numFrames > 30) {
+					if (vai->numFrames > 15) {
 						vai->status = VertexArrayInfoGX2::VAI_RELIABLE;
 					}
 				}
@@ -577,14 +591,20 @@ void DrawEngineGX2::DoFlush() {
 				if (vai->lastFrame != gpuStats.numFlips) {
 					vai->numFrames++;
 				}
+				u64 v0 = OSGetSystemTime();
 				decodeUncached();
+				g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
 				goto rotateVBO;
 			}
 			}
 
 			vai->lastFrame = gpuStats.numFlips;
 		} else {
-			decodeUncached();
+			{
+				u64 v0 = OSGetSystemTime();
+				decodeUncached();
+				g_gx2Perf.vdecTicks += OSGetSystemTime() - v0;
+			}
 		rotateVBO:
 			gpuStats.numUncachedVertsDrawn += indexGen.VertexCount();
 			useElements = !indexGen.SeenOnlyPurePrims() || prim == GE_PRIM_TRIANGLE_FAN;
@@ -669,6 +689,7 @@ void DrawEngineGX2::DoFlush() {
 		}
 		shaderManager_->UpdateUniforms(pushUBO_, framebufferManager_->UseBufferedRendering());
 
+		u64 dr0 = OSGetSystemTime();
 		if (fetchShader != lastBoundFetchShader_) {
 			GX2SetFetchShader(fetchShader);
 			lastBoundFetchShader_ = fetchShader;
@@ -705,6 +726,7 @@ void DrawEngineGX2::DoFlush() {
 				GX2DrawEx(GX2prim[prim], vertexCount, 0, 1);
 			}
 		}
+		g_gx2Perf.drawTicks += OSGetSystemTime() - dr0;
 		if (gpuStats.numFlips == s_snapFrame && s_snapCount <= 400)
 			SnapPixelsAfterDraw(draw_, framebufferManager_, s_snapCount);
 	} else {

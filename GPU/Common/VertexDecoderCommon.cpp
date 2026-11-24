@@ -47,6 +47,184 @@ static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 // is kept in registers.
 alignas(16) static float skinMatrix[12];
 
+// L1-cached 8-bit -> float LUTs: eliminates PowerPC int-to-float stack store-forwarding stalls.
+static const float *GetU8Div128Lut() {
+	static float lut[256];
+	static bool inited = false;
+	if (!inited) {
+		for (int i = 0; i < 256; ++i)
+			lut[i] = (float)i * (1.0f / 128.0f);
+		inited = true;
+	}
+	return lut;
+}
+
+static const float *GetS8Div128Lut() {
+	static float lut[256];
+	static bool inited = false;
+	if (!inited) {
+		for (int i = 0; i < 256; ++i)
+			lut[i] = (float)(s8)i * (1.0f / 128.0f);
+		inited = true;
+	}
+	return lut;
+}
+
+#ifdef __wiiu__
+// Fused in-register PowerPC 750CL Paired-Singles software skinning:
+// Accumulates all non-zero bone matrices into fr0..fr7 (ZERO skinMatrix memory traffic)
+// and transforms both position and optional normal directly from registers.
+static inline void SkinPosNormPS(const float *weights, int nw, const float *boneBase,
+	const float *inPos, float *outPos, const float *inNrm, float *outNrm) {
+	const float zero = 0.0f;
+	const float *wPtr = weights;
+	const float *bPtr = boneBase;
+	asm volatile(
+		".machine push\n\t"
+		".machine gekko\n\t"
+		"ps_merge00 0, %[z], %[z]\n\t"
+		"ps_merge00 1, %[z], %[z]\n\t"
+		"ps_merge00 2, %[z], %[z]\n\t"
+		"ps_merge00 3, %[z], %[z]\n\t"
+		"ps_merge00 4, %[z], %[z]\n\t"
+		"ps_merge00 5, %[z], %[z]\n\t"
+		"ps_merge00 6, %[z], %[z]\n\t"
+		"ps_merge00 7, %[z], %[z]\n\t"
+		"mtctr     %[nw]\n\t"
+		"1:\n\t"
+		"lfs       12, 0(%[w])\n\t"
+		"addi      %[w], %[w], 4\n\t"
+		"fcmpu     0, 12, %[z]\n\t"
+		"beq       0, 2f\n\t"
+		"psq_l      8,  0(%[b]), 0, 0\n\t"
+		"lfs        9,  8(%[b])\n\t"
+		"psq_l     10, 12(%[b]), 0, 0\n\t"
+		"lfs       11, 20(%[b])\n\t"
+		"ps_madds0  0,  8, 12, 0\n\t"
+		"ps_madds0  1,  9, 12, 1\n\t"
+		"ps_madds0  2, 10, 12, 2\n\t"
+		"ps_madds0  3, 11, 12, 3\n\t"
+		"psq_l      8, 24(%[b]), 0, 0\n\t"
+		"lfs        9, 32(%[b])\n\t"
+		"psq_l     10, 36(%[b]), 0, 0\n\t"
+		"lfs       11, 44(%[b])\n\t"
+		"ps_madds0  4,  8, 12, 4\n\t"
+		"ps_madds0  5,  9, 12, 5\n\t"
+		"ps_madds0  6, 10, 12, 6\n\t"
+		"ps_madds0  7, 11, 12, 7\n\t"
+		"2:\n\t"
+		"addi      %[b], %[b], 48\n\t"
+		"bdnz      1b\n\t"
+		"lfs       10, 0(%[ip])\n\t"
+		"lfs       11, 4(%[ip])\n\t"
+		"lfs       12, 8(%[ip])\n\t"
+		"ps_madds0  8, 0, 10, 6\n\t"
+		"ps_madds0  9, 1, 10, 7\n\t"
+		"ps_madds0  8, 2, 11, 8\n\t"
+		"ps_madds0  9, 3, 11, 9\n\t"
+		"ps_madds0  8, 4, 12, 8\n\t"
+		"ps_madds0  9, 5, 12, 9\n\t"
+		"psq_st     8, 0(%[op]), 0, 0\n\t"
+		"stfs       9, 8(%[op])\n\t"
+		"cmpwi     0, %[in], 0\n\t"
+		"beq       0, 3f\n\t"
+		"lfs       10, 0(%[in])\n\t"
+		"lfs       11, 4(%[in])\n\t"
+		"lfs       12, 8(%[in])\n\t"
+		"ps_muls0   8, 0, 10\n\t"
+		"ps_muls0   9, 1, 10\n\t"
+		"ps_madds0  8, 2, 11, 8\n\t"
+		"ps_madds0  9, 3, 11, 9\n\t"
+		"ps_madds0  8, 4, 12, 8\n\t"
+		"ps_madds0  9, 5, 12, 9\n\t"
+		"psq_st     8, 0(%[on]), 0, 0\n\t"
+		"stfs       9, 8(%[on])\n\t"
+		"3:\n\t"
+		".machine pop\n\t"
+		: [w] "+b"(wPtr), [b] "+b"(bPtr)
+		: [nw] "r"(nw), [z] "f"(zero),
+		  [ip] "b"(inPos), [op] "b"(outPos),
+		  [in] "b"(inNrm), [on] "b"(outNrm)
+		: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
+		  "fr8", "fr9", "fr10", "fr11", "fr12", "cr0", "ctr", "memory");
+}
+#endif
+
+// Zero-branch specialized inner loop for hot non-skinned vertex formats.
+template <int TC, int COL, int NRM, int POS>
+static void DecodeNonSkinnedT(
+	const u8 * __restrict p, u8 * __restrict d, int count,
+	int inSize, int stride,
+	int tcOff, int uvOff, float uMul, float vMul, float uAdd, float vAdd,
+	int cOff, int dc0Off, int nOff, int dnOff, int pOff, int dpOff,
+	bool &fullAlpha) {
+	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
+	const float * __restrict u8Lut = (TC == 1) ? GetU8Div128Lut() : nullptr;
+	for (; count > 0; --count) {
+		if (TC == 2) {
+			float *uv = (float *)(d + uvOff);
+			const u16_le *uv16 = (const u16_le *)(p + tcOff);
+			uv[0] = (float)uv16[0] * uMul + uAdd;
+			uv[1] = (float)uv16[1] * vMul + vAdd;
+		} else if (TC == 1) {
+			float *uv = (float *)(d + uvOff);
+			uv[0] = u8Lut[p[tcOff]] * uMul + uAdd;
+			uv[1] = u8Lut[p[tcOff + 1]] * vMul + vAdd;
+		} else if (TC == 3) {
+			float *uv = (float *)(d + uvOff);
+			const float_le *uvf = (const float_le *)(p + tcOff);
+			uv[0] = uvf[0] * uMul + uAdd;
+			uv[1] = uvf[1] * vMul + vAdd;
+		}
+		if (COL == 7) {
+			u32 cdata = *(const u32_le *)(p + cOff);
+			fullAlpha &= ((cdata >> 24) == 0xFF);
+			*(u32_le *)(d + dc0Off) = cdata;
+		}
+		if (NRM == 1) {
+			float *no = (float *)(d + dnOff);
+			const u8 *sv = p + nOff;
+			no[0] = s8Lut[sv[0]];
+			no[1] = s8Lut[sv[1]];
+			no[2] = s8Lut[sv[2]];
+		} else if (NRM == 2) {
+			s16 *no = (s16 *)(d + dnOff);
+			const s16_le *sv = (const s16_le *)(p + nOff);
+			no[0] = sv[0];
+			no[1] = sv[1];
+			no[2] = sv[2];
+			no[3] = 0;
+		} else if (NRM == 3) {
+			u32 *no = (u32 *)(d + dnOff);
+			const u32_le *fv = (const u32_le *)(p + nOff);
+			no[0] = fv[0];
+			no[1] = fv[1];
+			no[2] = fv[2];
+		}
+		if (POS == 2) {
+			float *po = (float *)(d + dpOff);
+			const s16_le *pv = (const s16_le *)(p + pOff);
+			po[0] = (float)pv[0] * (1.0f / 32768.0f);
+			po[1] = (float)pv[1] * (1.0f / 32768.0f);
+			po[2] = (float)pv[2] * (1.0f / 32768.0f);
+		} else if (POS == 3) {
+			u32 *po = (u32 *)(d + dpOff);
+			const u32_le *pv = (const u32_le *)(p + pOff);
+			po[0] = pv[0];
+			po[1] = pv[1];
+			po[2] = pv[2];
+		} else {
+			float *po = (float *)(d + dpOff);
+			const u8 *pv = p + pOff;
+			po[0] = s8Lut[pv[0]];
+			po[1] = s8Lut[pv[1]];
+			po[2] = s8Lut[pv[2]];
+		}
+		p += inSize;
+		d += stride;
+	}
+}
+
 inline int align(int n, int align) {
 	return (n + (align - 1)) & ~(align - 1);
 }
@@ -1438,14 +1616,59 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 		const int pOff = posoff;
 		const int dpOff = decFmt.posoff;
 		bool fullAlpha = gstate_c.vertexFullAlpha;
+		const float * __restrict s8Lut = GetS8Div128Lut();
+		const float * __restrict u8Lut = GetU8Div128Lut();
+
+		// Zero-branch specialized dispatch for the hottest non-skinned PSP vertex formats.
+		if (!wt && (colFmt == 0 || colFmt == 7) && (posFmt == 2 || posFmt == 3)) {
+			const float tcUMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.uScale : 1.0f) : uMul;
+			const float tcVMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.vScale : 1.0f) : vMul;
+			const u32 key = (tcFmt << 8) | (colFmt << 4) | (nrmFmt << 2) | posFmt;
+			bool handled = true;
+			switch (key) {
+#define DISPATCH_NS(T, C, N, P) \
+	case ((T << 8) | (C << 4) | (N << 2) | P): \
+		DecodeNonSkinnedT<T, C, N, P>(p, d, count, inSize, stride, tcOff, uvOff, tcUMul, tcVMul, uAdd, vAdd, cOff, dc0Off, nOff, dnOff, pOff, dpOff, fullAlpha); \
+		break
+			DISPATCH_NS(2, 0, 1, 2);
+			DISPATCH_NS(2, 7, 1, 2);
+			DISPATCH_NS(2, 0, 0, 2);
+			DISPATCH_NS(2, 7, 0, 2);
+			DISPATCH_NS(2, 0, 2, 2);
+			DISPATCH_NS(2, 7, 2, 2);
+			DISPATCH_NS(2, 0, 1, 3);
+			DISPATCH_NS(2, 7, 1, 3);
+			DISPATCH_NS(3, 0, 3, 3);
+			DISPATCH_NS(3, 7, 3, 3);
+			DISPATCH_NS(3, 0, 0, 3);
+			DISPATCH_NS(3, 7, 0, 3);
+			DISPATCH_NS(3, 0, 1, 3);
+			DISPATCH_NS(3, 7, 1, 3);
+			DISPATCH_NS(0, 7, 0, 2);
+			DISPATCH_NS(0, 7, 0, 3);
+			DISPATCH_NS(0, 0, 1, 2);
+			DISPATCH_NS(0, 0, 0, 2);
+			DISPATCH_NS(0, 0, 0, 3);
+			DISPATCH_NS(1, 7, 0, 2);
+			DISPATCH_NS(1, 0, 1, 2);
+#undef DISPATCH_NS
+			default:
+				handled = false;
+				break;
+			}
+			if (handled) {
+				gstate_c.vertexFullAlpha = fullAlpha;
+				return;
+			}
+		}
 
 		for (; count > 0; --count) {
+			float weights[8];
 			if (wt) {
 				if (swSkin) {
-					float weights[8];
 					if (wt == 1) {
 						for (int j = 0; j < nw; ++j)
-							weights[j] = p[j] ? (p[j] * (1.0f / 128.0f)) : 0.0f;
+							weights[j] = u8Lut[p[j]];
 					} else if (wt == 2) {
 						const u16_le *w16 = (const u16_le *)p;
 						for (int j = 0; j < nw; ++j) {
@@ -1457,12 +1680,14 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 						for (int j = 0; j < nw; ++j)
 							weights[j] = wf[j];
 					}
+#ifndef __wiiu__
 					ComputeSkinMatrix(weights);
+#endif
 				} else {
 					float *outW = (float *)d;
 					if (wt == 1) {
 						for (int j = 0; j < nw; ++j)
-							outW[j] = p[j] * (1.0f / 128.0f);
+							outW[j] = u8Lut[p[j]];
 					} else if (wt == 2) {
 						const u16_le *w16 = (const u16_le *)p;
 						for (int j = 0; j < nw; ++j)
@@ -1484,8 +1709,8 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 					uv[1] = (float)uv16[1] * vMul + vAdd;
 				} else if (tcFmt == 1) {
 					const u8 *uv8 = p + tcOff;
-					uv[0] = (float)uv8[0] * uMul + uAdd;
-					uv[1] = (float)uv8[1] * vMul + vAdd;
+					uv[0] = u8Lut[uv8[0]] * (prescale ? gstate_c.uv.uScale : 1.0f) + uAdd;
+					uv[1] = u8Lut[uv8[1]] * (prescale ? gstate_c.uv.vScale : 1.0f) + vAdd;
 				} else {
 					const float_le *uvf = (const float_le *)(p + tcOff);
 					uv[0] = uvf[0] * uMul + uAdd;
@@ -1523,86 +1748,95 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 					*cOut = c;
 				}
 			}
-			if (nrmFmt) {
-				if (swSkin) {
-					float *no = (float *)(d + dnOff);
-					float fn[3];
+			if (swSkin) {
+				float inNrm[3];
+				float *outNrm = nullptr;
+				if (nrmFmt) {
+					outNrm = (float *)(d + dnOff);
 					if (nrmFmt == 1) {
-						const s8 *sv = (const s8 *)(p + nOff);
-						fn[0] = sv[0] * (1.0f / 128.0f);
-						fn[1] = sv[1] * (1.0f / 128.0f);
-						fn[2] = sv[2] * (1.0f / 128.0f);
+						const u8 *sv = p + nOff;
+						inNrm[0] = s8Lut[sv[0]];
+						inNrm[1] = s8Lut[sv[1]];
+						inNrm[2] = s8Lut[sv[2]];
 					} else if (nrmFmt == 2) {
 						const s16_le *sv = (const s16_le *)(p + nOff);
-						fn[0] = (float)sv[0] * (1.0f / 32768.0f);
-						fn[1] = (float)sv[1] * (1.0f / 32768.0f);
-						fn[2] = (float)sv[2] * (1.0f / 32768.0f);
+						inNrm[0] = (float)sv[0] * (1.0f / 32768.0f);
+						inNrm[1] = (float)sv[1] * (1.0f / 32768.0f);
+						inNrm[2] = (float)sv[2] * (1.0f / 32768.0f);
 					} else {
 						const float_le *fv = (const float_le *)(p + nOff);
-						fn[0] = fv[0];
-						fn[1] = fv[1];
-						fn[2] = fv[2];
+						inNrm[0] = fv[0];
+						inNrm[1] = fv[1];
+						inNrm[2] = fv[2];
 					}
-					Norm3ByMatrix43(no, fn, skinMatrix);
-				} else if (nrmFmt == 1) {
-					float *no = (float *)(d + dnOff);
-					const s8 *sv = (const s8 *)(p + nOff);
-					no[0] = sv[0] * (1.0f / 128.0f);
-					no[1] = sv[1] * (1.0f / 128.0f);
-					no[2] = sv[2] * (1.0f / 128.0f);
-				} else if (nrmFmt == 2) {
-					s16 *no = (s16 *)(d + dnOff);
-					const s16_le *sv = (const s16_le *)(p + nOff);
-					no[0] = sv[0];
-					no[1] = sv[1];
-					no[2] = sv[2];
-					no[3] = 0;
-				} else {
-					u32 *no = (u32 *)(d + dnOff);
-					const u32_le *fv = (const u32_le *)(p + nOff);
-					no[0] = fv[0];
-					no[1] = fv[1];
-					no[2] = fv[2];
 				}
-			}
-			if (swSkin) {
-				float *po = (float *)(d + dpOff);
-				float fn[3];
+				float inPos[3];
+				float *outPos = (float *)(d + dpOff);
 				if (posFmt == 2) {
 					const s16_le *pv = (const s16_le *)(p + pOff);
-					fn[0] = (float)pv[0] * (1.0f / 32768.0f);
-					fn[1] = (float)pv[1] * (1.0f / 32768.0f);
-					fn[2] = (float)pv[2] * (1.0f / 32768.0f);
+					inPos[0] = (float)pv[0] * (1.0f / 32768.0f);
+					inPos[1] = (float)pv[1] * (1.0f / 32768.0f);
+					inPos[2] = (float)pv[2] * (1.0f / 32768.0f);
 				} else if (posFmt == 3) {
 					const float_le *pv = (const float_le *)(p + pOff);
-					fn[0] = pv[0];
-					fn[1] = pv[1];
-					fn[2] = pv[2];
+					inPos[0] = pv[0];
+					inPos[1] = pv[1];
+					inPos[2] = pv[2];
 				} else {
-					const s8 *pv = (const s8 *)(p + pOff);
-					fn[0] = pv[0] * (1.0f / 128.0f);
-					fn[1] = pv[1] * (1.0f / 128.0f);
-					fn[2] = pv[2] * (1.0f / 128.0f);
+					const u8 *pv = p + pOff;
+					inPos[0] = s8Lut[pv[0]];
+					inPos[1] = s8Lut[pv[1]];
+					inPos[2] = s8Lut[pv[2]];
 				}
-				Vec3ByMatrix43(po, fn, skinMatrix);
-			} else if (posFmt == 2) {
-				float *po = (float *)(d + dpOff);
-				const s16_le *pv = (const s16_le *)(p + pOff);
-				po[0] = pv[0] * (1.0f / 32768.0f);
-				po[1] = pv[1] * (1.0f / 32768.0f);
-				po[2] = pv[2] * (1.0f / 32768.0f);
-			} else if (posFmt == 3) {
-				u32 *po = (u32 *)(d + dpOff);
-				const u32_le *pv = (const u32_le *)(p + pOff);
-				po[0] = pv[0];
-				po[1] = pv[1];
-				po[2] = pv[2];
+#ifdef __wiiu__
+				SkinPosNormPS(weights, nw, gstate.boneMatrix, inPos, outPos, outNrm ? inNrm : nullptr, outNrm);
+#else
+				if (outNrm)
+					Norm3ByMatrix43(outNrm, inNrm, skinMatrix);
+				Vec3ByMatrix43(outPos, inPos, skinMatrix);
+#endif
 			} else {
-				float *po = (float *)(d + dpOff);
-				const s8 *pv = (const s8 *)(p + pOff);
-				po[0] = pv[0] * (1.0f / 128.0f);
-				po[1] = pv[1] * (1.0f / 128.0f);
-				po[2] = pv[2] * (1.0f / 128.0f);
+				if (nrmFmt) {
+					if (nrmFmt == 1) {
+						float *no = (float *)(d + dnOff);
+						const u8 *sv = p + nOff;
+						no[0] = s8Lut[sv[0]];
+						no[1] = s8Lut[sv[1]];
+						no[2] = s8Lut[sv[2]];
+					} else if (nrmFmt == 2) {
+						s16 *no = (s16 *)(d + dnOff);
+						const s16_le *sv = (const s16_le *)(p + nOff);
+						no[0] = sv[0];
+						no[1] = sv[1];
+						no[2] = sv[2];
+						no[3] = 0;
+					} else {
+						u32 *no = (u32 *)(d + dnOff);
+						const u32_le *fv = (const u32_le *)(p + nOff);
+						no[0] = fv[0];
+						no[1] = fv[1];
+						no[2] = fv[2];
+					}
+				}
+				if (posFmt == 2) {
+					float *po = (float *)(d + dpOff);
+					const s16_le *pv = (const s16_le *)(p + pOff);
+					po[0] = pv[0] * (1.0f / 32768.0f);
+					po[1] = pv[1] * (1.0f / 32768.0f);
+					po[2] = pv[2] * (1.0f / 32768.0f);
+				} else if (posFmt == 3) {
+					u32 *po = (u32 *)(d + dpOff);
+					const u32_le *pv = (const u32_le *)(p + pOff);
+					po[0] = pv[0];
+					po[1] = pv[1];
+					po[2] = pv[2];
+				} else {
+					float *po = (float *)(d + dpOff);
+					const u8 *pv = p + pOff;
+					po[0] = s8Lut[pv[0]];
+					po[1] = s8Lut[pv[1]];
+					po[2] = s8Lut[pv[2]];
+				}
 			}
 			p += inSize;
 			d += stride;
@@ -1689,8 +1923,10 @@ VertexDecoderJitCache::VertexDecoderJitCache()
  : fp(this)
 #endif
 {
+#ifndef __wiiu__
 	// 256k should be enough.
 	AllocCodeSpace(1024 * 64 * 4);
+#endif
 
 	// Add some random code to "help" MSVC's buggy disassembler :(
 #if defined(_WIN32) && (defined(_M_IX86) || defined(_M_X64))

@@ -2333,16 +2333,22 @@ void GPUCommon::Execute_WorldMtxNum(u32 op, u32 diff) {
 	}
 
 	if (fastLoad) {
+		bool changed = false;
 		while ((src[i] >> 24) == GE_CMD_WORLDMATRIXDATA) {
 			const u32 newVal = src[i] << 8;
 			if (dst[i] != newVal) {
-				Flush();
+				if (!changed) {
+					Flush();
+					changed = true;
+				}
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_WORLDMATRIX);
 			}
 			if (++i >= end) {
 				break;
 			}
+		}
+		if (changed) {
+			gstate_c.Dirty(DIRTY_WORLDMATRIX);
 		}
 	}
 
@@ -2380,16 +2386,22 @@ void GPUCommon::Execute_ViewMtxNum(u32 op, u32 diff) {
 	}
 
 	if (fastLoad) {
+		bool changed = false;
 		while ((src[i] >> 24) == GE_CMD_VIEWMATRIXDATA) {
 			const u32 newVal = src[i] << 8;
 			if (dst[i] != newVal) {
-				Flush();
+				if (!changed) {
+					Flush();
+					changed = true;
+				}
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_VIEWMATRIX);
 			}
 			if (++i >= end) {
 				break;
 			}
+		}
+		if (changed) {
+			gstate_c.Dirty(DIRTY_VIEWMATRIX);
 		}
 	}
 
@@ -2427,16 +2439,22 @@ void GPUCommon::Execute_ProjMtxNum(u32 op, u32 diff) {
 	}
 
 	if (fastLoad) {
+		bool changed = false;
 		while ((src[i] >> 24) == GE_CMD_PROJMATRIXDATA) {
 			const u32 newVal = src[i] << 8;
 			if (dst[i] != newVal) {
-				Flush();
+				if (!changed) {
+					Flush();
+					changed = true;
+				}
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_PROJMATRIX);
 			}
 			if (++i >= end) {
 				break;
 			}
+		}
+		if (changed) {
+			gstate_c.Dirty(DIRTY_PROJMATRIX);
 		}
 	}
 
@@ -2475,16 +2493,22 @@ void GPUCommon::Execute_TgenMtxNum(u32 op, u32 diff) {
 	}
 
 	if (fastLoad) {
+		bool changed = false;
 		while ((src[i] >> 24) == GE_CMD_TGENMATRIXDATA) {
 			const u32 newVal = src[i] << 8;
 			if (dst[i] != newVal) {
-				Flush();
+				if (!changed) {
+					Flush();
+					changed = true;
+				}
 				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_TEXMATRIX);
 			}
 			if (++i >= end) {
 				break;
 			}
+		}
+		if (changed) {
+			gstate_c.Dirty(DIRTY_TEXMATRIX);
 		}
 	}
 
@@ -2540,11 +2564,26 @@ void GPUCommon::Execute_BoneMtxNum(u32 op, u32 diff) {
 				gstate_c.Dirty(DIRTY_BONEMATRIX0 << (num / 12));
 			}
 		} else {
-			while ((src[i] >> 24) == GE_CMD_BONEMATRIXDATA) {
-				dst[i] = src[i] << 8;
-				if (++i >= end) {
+			while (i + 4 <= end) {
+				const u32 w0 = src[i + 0];
+				const u32 w1 = src[i + 1];
+				const u32 w2 = src[i + 2];
+				const u32 w3 = src[i + 3];
+				if (((w0 >> 24) != GE_CMD_BONEMATRIXDATA) |
+				    ((w1 >> 24) != GE_CMD_BONEMATRIXDATA) |
+				    ((w2 >> 24) != GE_CMD_BONEMATRIXDATA) |
+				    ((w3 >> 24) != GE_CMD_BONEMATRIXDATA)) {
 					break;
 				}
+				dst[i + 0] = w0 << 8;
+				dst[i + 1] = w1 << 8;
+				dst[i + 2] = w2 << 8;
+				dst[i + 3] = w3 << 8;
+				i += 4;
+			}
+			while (i < end && (src[i] >> 24) == GE_CMD_BONEMATRIXDATA) {
+				dst[i] = src[i] << 8;
+				++i;
 			}
 
 			const unsigned int numPlusCount = (op & 0x7F) + i;
