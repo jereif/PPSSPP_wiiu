@@ -98,18 +98,19 @@ void Jit::Compile(u32 em_address)
 	if (GetSpaceLeft() < 0x4000 || blocks.IsFull())
 	{
 		g_cacheClears++;
-		NOTICE_LOG(JIT, "Clearing JIT cache (spaceLeft=%d, blocksFull=%d)", (int)GetSpaceLeft(), (int)blocks.IsFull());
-		LogJitStats("clear", GetSpaceLeft(), region_size);
+		u64 clearStart = OSGetSystemTime();
 		ClearCache();
+		int clearMs = (int)ticks_to_ms(OSGetSystemTime() - clearStart);
+		NOTICE_LOG(JIT, "Cleared JIT cache #%d in %d ms (blocks=%d, compile=%d ms of %d ms wall)",
+			g_cacheClears, clearMs, g_compiledBlocks,
+			(int)ticks_to_ms(g_compileTicks), g_firstCompileTick ? (int)ticks_to_ms(OSGetSystemTime() - g_firstCompileTick) : 0);
 	}
 
 	int block_num = blocks.AllocateBlock(em_address);
 	JitBlock *b = blocks.GetBlock(block_num);
 	DoJit(em_address, b);
 	blocks.FinalizeBlock(block_num, jo.enableBlocklink);
-	if ((++g_compiledBlocks % 4000) == 0) {
-		LogJitStats("periodic", GetSpaceLeft(), region_size);
-	}
+	++g_compiledBlocks;
 
 	// Drat.  The VFPU hit an uneaten prefix at the end of a block.
 	if (js.startDefaultPrefix && js.MayHavePrefix())

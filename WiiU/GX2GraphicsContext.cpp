@@ -124,6 +124,7 @@ bool GX2GraphicsContext::Init() {
 
 	GX2SetContextState(ctx_state_);
 	GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
+	GX2SetRasterizerClipControlHalfZ(GX2_TRUE, GX2_TRUE, GX2_TRUE);
 	GX2SetColorBuffer(&color_buffer_, GX2_RENDER_TARGET_0);
 	GX2SetDepthBuffer(&depth_buffer_);
 	GX2SetViewport(0.0f, 0.0f, color_buffer_.surface.width, color_buffer_.surface.height, 0.0f, 1.0f);
@@ -213,4 +214,5 @@ void GX2GraphicsContext::SwapBuffers() {
 	}
 	GX2SetContextState(ctx_state_);
 	GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
+	GX2SetRasterizerClipControlHalfZ(GX2_TRUE, GX2_TRUE, GX2_TRUE);
 }

@@ -105,13 +105,16 @@ index 0ffb6c1..231b1b5 100644
  	DEBUG_VAR(mcp_hook_fd);
  	DEBUG_VAR2(MEM1_avail());
 diff --git a/exception_handler.c b/exception_handler.c
-index 2d2461c..17c2ae8 100644
+index 2d2461c..e344465 100644
 --- a/exception_handler.c
 +++ b/exception_handler.c
-@@ -102,6 +102,14 @@ static void disasm_printfcallback(const char* fmt, ...)
+@@ -102,6 +102,17 @@ static void disasm_printfcallback(const char* fmt, ...)
  static void print_and_abort()
  {
     DEBUG_LINE();
++   net_print_exp("\n=== EXCEPTION CAUGHT ===\n");
++   net_print_exp(exception_msgbuf);
++   net_print_exp("\n========================\n");
 +   {
 +      FILE *f = fopen("sd:/ppsspp_boot.log", "a");
 +      if (f) {
@@ -124,7 +127,7 @@ index 2d2461c..17c2ae8 100644
     puts(exception_msgbuf);
     DEBUG_STR(OSGetThreadName(OSGetCurrentThread()));
 diff --git a/imports.h b/imports.h
-index 76d3c8b..a663244 100644
+index 76d3c8b..2dbac26 100644
 --- a/imports.h
 +++ b/imports.h
 @@ -112,7 +112,9 @@ FIMPORT(MEMDestroyExpHeap)
@@ -137,7 +140,23 @@ index 76d3c8b..a663244 100644
  FIMPORT(MEMAllocFromFrmHeapEx)
  FIMPORT(MEMFreeToFrmHeap)
  FIMPORT(MEMGetAllocatableSizeForFrmHeapEx)
-@@ -278,6 +280,9 @@ FIMPORT(GX2FreeTilingAperture)
+@@ -207,6 +209,7 @@ FIMPORT(GX2SetContextState)
+ FIMPORT(GX2SetColorBuffer)
+ FIMPORT(GX2SetDepthBuffer)
+ FIMPORT(GX2SetViewport)
++FIMPORT(GX2InitViewportReg)
+ FIMPORT(GX2SetViewportReg)
+ FIMPORT(GX2SetScissor)
+ FIMPORT(GX2GetScissorReg)
+@@ -226,6 +229,7 @@ FIMPORT(GX2SetDepthStencilControlReg)
+ FIMPORT(GX2SetBlendConstantColor)
+ FIMPORT(GX2SetBlendConstantColorReg)
+ FIMPORT(GX2SetCullOnlyControl)
++FIMPORT(GX2SetRasterizerClipControlHalfZ)
+ FIMPORT(GX2CalcFetchShaderSizeEx)
+ FIMPORT(GX2InitFetchShaderEx)
+ FIMPORT(GX2SetFetchShader)
+@@ -278,6 +282,9 @@ FIMPORT(GX2FreeTilingAperture)
  FIMPORT_BEGIN(proc_ui)
  FIMPORT(ProcUIInit)
  FIMPORT(ProcUIShutdown)
@@ -147,6 +166,18 @@ index 76d3c8b..a663244 100644
  /* sndcore2 */
  FIMPORT_BEGIN(sndcore2)
  FIMPORT(AXInitWithParams)
+diff --git a/include/wiiu/gx2/registers.h b/include/wiiu/gx2/registers.h
+index 3fbc6e9..d2b8935 100644
+--- a/include/wiiu/gx2/registers.h
++++ b/include/wiiu/gx2/registers.h
+@@ -191,6 +191,7 @@ void GX2InitPointLimitsReg(GX2PointLimitsReg *reg, float min, float max);
+ void GX2GetPointLimitsReg(GX2PointLimitsReg *reg, float *min, float *max);
+ void GX2SetPointLimitsReg(GX2PointLimitsReg *reg);
+ void GX2SetCullOnlyControl(GX2FrontFace frontFace, BOOL cullFront, BOOL cullBack);
++void GX2SetRasterizerClipControlHalfZ(BOOL rasterizer, BOOL zclip, BOOL halfZ);
+ void GX2SetPolygonControl(GX2FrontFace frontFace, BOOL cullFront, BOOL cullBack, BOOL polyMode,
+                           GX2PolygonMode polyModeFront, GX2PolygonMode polyModeBack, BOOL polyOffsetFrontEnable,
+                           BOOL polyOffsetBackEnable, BOOL polyOffsetParaEnable);
 diff --git a/include/wiiu/gx2/shader_emitter.hpp b/include/wiiu/gx2/shader_emitter.hpp
 index f043196..9ca5f7e 100644
 --- a/include/wiiu/gx2/shader_emitter.hpp
@@ -271,10 +302,10 @@ index e0b5eaa..5859c1c 100644
        MEMFreeToExpHeap(bucket_heap, ptr);
  }
 diff --git a/pthread.c b/pthread.c
-index c2ebc63..2dae4d6 100644
+index c2ebc63..2cfce5e 100644
 --- a/pthread.c
 +++ b/pthread.c
-@@ -1,168 +1,965 @@
+@@ -1,168 +1,975 @@
 +/* pthread implementation for devkitPPC / Wii U (coreinit based).
 + *
 + * The original version of this file targeted the 2018 newlib, where the
@@ -327,8 +358,7 @@ index c2ebc63..2dae4d6 100644
 +   int32_t count;
 +   int recursive;
 +} wup_mutex_impl;
- 
--pthread_t pthread_self (void)
++
 +typedef struct
 +{
 +   OSCondition cond;
@@ -358,7 +388,8 @@ index c2ebc63..2dae4d6 100644
 +      return (wup_mutex_impl *)(uintptr_t)val;
 +   if (!create)
 +      return NULL;
-+
+ 
+-pthread_t pthread_self (void)
 +   wup_mutex_impl *impl = (wup_mutex_impl *)calloc(1, sizeof(wup_mutex_impl));
 +   if (!impl)
 +      return NULL;
@@ -438,15 +469,15 @@ index c2ebc63..2dae4d6 100644
 +{
 +   OSSetThreadName((OSThread *)target_thread, name);
 +   return 0;
++}
++
++int pthread_equal(pthread_t t1, pthread_t t2)
++{
++   return t1 == t2;
  }
  
 -int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
 -   OSInitMutex((OSMutex *)(*mutex = (pthread_mutex_t)calloc(1, sizeof(OSMutex))));
-+int pthread_equal(pthread_t t1, pthread_t t2)
-+{
-+   return t1 == t2;
-+}
-+
 +int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 +                   void *(*start_routine)(void *), void *arg)
 +{
@@ -501,9 +532,12 @@ index c2ebc63..2dae4d6 100644
 +
 +   *thread = (pthread_t)&self->thread;
 +   OSResumeThread(&self->thread);
-+   return 0;
-+}
-+
+    return 0;
+ }
+ 
+-static void check_mutex(pthread_mutex_t *mutex) {
+-   if (*mutex == _PTHREAD_MUTEX_INITIALIZER)
+-      pthread_mutex_init(mutex, NULL);
 +int pthread_join(pthread_t thread, void **value_ptr)
 +{
 +   wup_thread *self = (wup_thread *)thread;
@@ -521,12 +555,13 @@ index c2ebc63..2dae4d6 100644
 +   free(self->stack);
 +   free(self);
 +
-    return 0;
++   return 0;
  }
  
--static void check_mutex(pthread_mutex_t *mutex) {
--   if (*mutex == _PTHREAD_MUTEX_INITIALIZER)
--      pthread_mutex_init(mutex, NULL);
+-int pthread_mutex_destroy(pthread_mutex_t *mutex) {
+-   if (*mutex != _PTHREAD_MUTEX_INITIALIZER)
+-      free((OSMutex *)*mutex);
+-   *mutex = 0;
 +int pthread_detach(pthread_t thread)
 +{
 +   wup_thread *self = (wup_thread *)thread;
@@ -539,13 +574,12 @@ index c2ebc63..2dae4d6 100644
 +      OSSetThreadDeallocator(&self->thread, thread_deallocator);
 +   }
 +   OSDetachThread(&self->thread);
-+   return 0;
+    return 0;
  }
  
--int pthread_mutex_destroy(pthread_mutex_t *mutex) {
--   if (*mutex != _PTHREAD_MUTEX_INITIALIZER)
--      free((OSMutex *)*mutex);
--   *mutex = 0;
+-int pthread_mutex_lock(pthread_mutex_t *mutex) {
+-   check_mutex(mutex);
+-   OSLockMutex((OSMutex *)*mutex);
 +void pthread_exit(void *value_ptr)
 +{
 +   (void)value_ptr;
@@ -558,9 +592,9 @@ index c2ebc63..2dae4d6 100644
     return 0;
  }
  
--int pthread_mutex_lock(pthread_mutex_t *mutex) {
+-int pthread_mutex_unlock(pthread_mutex_t *mutex) {
 -   check_mutex(mutex);
--   OSLockMutex((OSMutex *)*mutex);
+-   OSUnlockMutex((OSMutex *)*mutex);
 +/* ------------------------------------------------------------------ */
 +/* Attributes                                                         */
 +/* ------------------------------------------------------------------ */
@@ -572,30 +606,21 @@ index c2ebc63..2dae4d6 100644
 +   attr->detachstate = PTHREAD_CREATE_JOINABLE;
     return 0;
  }
- 
--int pthread_mutex_unlock(pthread_mutex_t *mutex) {
--   check_mutex(mutex);
--   OSUnlockMutex((OSMutex *)*mutex);
-+int pthread_attr_destroy(pthread_attr_t *attr)
-+{
-+   (void)attr;
-    return 0;
- }
 -int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
 -   OSInitCond((OSCondition *)(*cond = (pthread_cond_t)malloc(sizeof(OSCondition))));
 +
-+int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
++int pthread_attr_destroy(pthread_attr_t *attr)
 +{
-+   attr->stacksize = (int)stacksize;
++   (void)attr;
     return 0;
  }
 -int pthread_cond_destroy(pthread_cond_t *cond) {
 -   free((void *)*cond);
 -   *cond = 0;
 +
-+int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
++int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
 +{
-+   *stacksize = (size_t)attr->stacksize;
++   attr->stacksize = (int)stacksize;
     return 0;
  }
  
@@ -603,32 +628,34 @@ index c2ebc63..2dae4d6 100644
 -   // OSSignalCond is actually a broadcast,
 -   // this is fine tough because pthread allows that.
 -   OSSignalCond((OSCondition *)*cond);
-+int pthread_attr_setstackaddr(pthread_attr_t *attr, void *stackaddr)
++int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
 +{
-+   attr->stackaddr = stackaddr;
++   *stacksize = (size_t)attr->stacksize;
     return 0;
  }
 -int pthread_cond_broadcast(pthread_cond_t *cond) {
 -   OSSignalCond((OSCondition *)*cond);
 +
-+int pthread_attr_getstackaddr(const pthread_attr_t *attr, void **stackaddr)
++int pthread_attr_setstackaddr(pthread_attr_t *attr, void *stackaddr)
 +{
-+   *stackaddr = attr->stackaddr;
++   attr->stackaddr = stackaddr;
     return 0;
  }
 -int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
 -   OSWaitCond((OSCondition *)*cond, (OSMutex *)*mutex);
 +
++int pthread_attr_getstackaddr(const pthread_attr_t *attr, void **stackaddr)
++{
++   *stackaddr = attr->stackaddr;
++   return 0;
++}
++
 +int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate)
 +{
 +   attr->detachstate = detachstate;
-    return 0;
- }
- 
--int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
--   if (!OSTestAndSetAtomic((u32*)&once_control->is_initialized, 1)) {
--      init_routine();
--      once_control->init_executed = 1;
++   return 0;
++}
++
 +int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate)
 +{
 +   *detachstate = attr->detachstate;
@@ -655,9 +682,13 @@ index c2ebc63..2dae4d6 100644
 +int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
 +{
 +   attr->type = type;
-+   return 0;
-+}
-+
+    return 0;
+ }
+ 
+-int pthread_once(pthread_once_t *once_control, void (*init_routine)(void)) {
+-   if (!OSTestAndSetAtomic((u32*)&once_control->is_initialized, 1)) {
+-      init_routine();
+-      once_control->init_executed = 1;
 +int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type)
 +{
 +   *type = attr->type;
@@ -897,33 +928,24 @@ index c2ebc63..2dae4d6 100644
 +   attr->clock_id = CLOCK_REALTIME;
 +   return 0;
 +}
- 
--int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, _CONST struct timespec *abstime) {
--   OSWaitCond((OSCondition*)*cond, (OSMutex*)*mutex);
++
 +int pthread_condattr_destroy(pthread_condattr_t *attr)
 +{
 +   (void)attr;
-    return 0;
- }
- 
--int pthread_detach(pthread_t pthread) {
--   OSDetachThread((OSThread *)pthread);
++   return 0;
++}
++
 +int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clock_id)
 +{
 +   attr->clock_id = clock_id;
-    return 0;
- }
--#ifdef _UNIX98_THREAD_MUTEX_ATTRIBUTES
--int pthread_mutexattr_gettype(_CONST pthread_mutexattr_t *attr, int *kind) {
--   *kind = attr->type;
++   return 0;
++}
 +
 +int pthread_condattr_getclock(const pthread_condattr_t *attr, clockid_t *clock_id)
 +{
 +   *clock_id = attr->clock_id;
-    return 0;
- }
--int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int kind) {
--   attr->type = kind;
++   return 0;
++}
 +
 +typedef struct
 +{
@@ -988,22 +1010,30 @@ index c2ebc63..2dae4d6 100644
 +
 +int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 +{
-+   uint32_t old = 0;
-+
-+   if (OSCompareAndSwapAtomicEx((uint32_t *)&once_control->status, 0, 1, &old))
++   /* Prebuilt libs (e.g. ffmpeg/wiiu/lib/libavcodec.a) were compiled against an
++    * older newlib where PTHREAD_ONCE_INIT was { 1, 0 } (is_initialized=1 at
++    * offset 0), whereas current devkitPPC newlib uses { 0 } (status=0).
++    * Treat both 0 and 1 as "not run", 3 as "running", and 2 as "done". */
++   volatile uint32_t *slot = (volatile uint32_t *)&once_control->status;
++   for (;;)
 +   {
-+      init_routine();
-+      OSCompareAndSwapAtomic((uint32_t *)&once_control->status, 1, 2);
-+      return 0;
-+   }
-+
-+   while (once_control->status != 2)
++      uint32_t val = *slot;
++      if (val == 2)
++         return 0;
++      if (val == 0 || val == 1)
++      {
++         uint32_t old = 0;
++         if (OSCompareAndSwapAtomicEx((uint32_t *)slot, val, 3, &old))
++         {
++            init_routine();
++            OSCompareAndSwapAtomic((uint32_t *)slot, 3, 2);
++            return 0;
++         }
++         continue;
++      }
 +      OSYieldThread();
-+
-    return 0;
- }
--#endif
--#endif
++   }
++}
 +
 +/* ------------------------------------------------------------------ */
 +/* Thread specific data                                               */
@@ -1096,7 +1126,9 @@ index c2ebc63..2dae4d6 100644
 +{
 +   return pthread_mutex_unlock((pthread_mutex_t *)rwlock);
 +}
-+
+ 
+-int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, _CONST struct timespec *abstime) {
+-   OSWaitCond((OSCondition*)*cond, (OSMutex*)*mutex);
 +/* ------------------------------------------------------------------ */
 +/* newlib internal locking (sys/lock.h)                               */
 +/* ------------------------------------------------------------------ */
@@ -1153,14 +1185,19 @@ index c2ebc63..2dae4d6 100644
 +int __libc_lock(_LOCK_T *lock)
 +{
 +   __libc_lock_acquire(lock);
-+   return 0;
-+}
-+
+    return 0;
+ }
+ 
+-int pthread_detach(pthread_t pthread) {
+-   OSDetachThread((OSThread *)pthread);
 +int __libc_lock_recursive(_LOCK_RECURSIVE_T *lock)
 +{
 +   __libc_lock_acquire_recursive(lock);
-+   return 0;
-+}
+    return 0;
+ }
+-#ifdef _UNIX98_THREAD_MUTEX_ATTRIBUTES
+-int pthread_mutexattr_gettype(_CONST pthread_mutexattr_t *attr, int *kind) {
+-   *kind = attr->type;
 +
 +void __libc_lock_acquire(_LOCK_T *lock)
 +{
@@ -1245,8 +1282,10 @@ index c2ebc63..2dae4d6 100644
 +
 +   impl->owner = OSGetCurrentThread();
 +   impl->count = 1;
-+   return 0;
-+}
+    return 0;
+ }
+-int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int kind) {
+-   attr->type = kind;
 +
 +void __libc_cond_close(_COND_T *cond)
 +{
@@ -1260,8 +1299,10 @@ index c2ebc63..2dae4d6 100644
 +   if (!c)
 +      return ENOMEM;
 +   OSSignalCond(c);
-+   return 0;
-+}
+    return 0;
+ }
+-#endif
+-#endif
 +
 +int __libc_cond_broadcast(_COND_T *cond)
 +{

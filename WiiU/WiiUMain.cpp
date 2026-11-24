@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
 //	g_Config.iFpsLimit = 0;
 	g_Config.bHardwareTransform = true;
 	g_Config.bSoftwareSkinning = false;
-	g_Config.bVertexCache = false; // DIAG: off so draw traces show real vertex data
+	g_Config.bVertexCache = true;
 //	PSP_CoreParameter().gpuCore = GPUCORE_NULL;
 //	g_Config.bTextureBackoffCache = true;
 	std::string error_string;

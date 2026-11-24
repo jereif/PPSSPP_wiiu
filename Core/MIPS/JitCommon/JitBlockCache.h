@@ -181,11 +181,93 @@ private:
 
 	CodeBlockCommon *codeBlock_;
 	JitBlock *blocks_;
+#ifdef __wiiu__
+	template <size_t NodeSize>
+	struct JitNodePool {
+		static constexpr size_t SlotSize = (NodeSize < sizeof(void *) ? sizeof(void *) : ((NodeSize + 7) & ~size_t(7)));
+		static constexpr size_t ChunkCount = 2048;
+		static void *&FreeList() {
+			static void *freeList = nullptr;
+			return freeList;
+		}
+		static void *Alloc() {
+			void *&fl = FreeList();
+			if (!fl) {
+				uint8_t *chunk = (uint8_t *)malloc(SlotSize * ChunkCount);
+				if (!chunk)
+					return nullptr;
+				for (size_t i = 0; i < ChunkCount; ++i) {
+					void *p = chunk + i * SlotSize;
+					*(void **)p = fl;
+					fl = p;
+				}
+			}
+			void *p = fl;
+			fl = *(void **)p;
+			return p;
+		}
+		static void Free(void *p) {
+			void *&fl = FreeList();
+			*(void **)p = fl;
+			fl = p;
+		}
+	};
+
+	template <typename T>
+	struct JitPoolAllocator {
+		using value_type = T;
+		using pointer = T *;
+		using const_pointer = const T *;
+		using reference = T &;
+		using const_reference = const T &;
+		using size_type = size_t;
+		using difference_type = ptrdiff_t;
+
+		template <typename U>
+		struct rebind {
+			using other = JitPoolAllocator<U>;
+		};
+
+		JitPoolAllocator() noexcept {}
+		template <typename U>
+		JitPoolAllocator(const JitPoolAllocator<U> &) noexcept {}
+
+		T *allocate(size_t n) {
+			if (n == 1) {
+				void *p = JitNodePool<sizeof(T)>::Alloc();
+				if (p)
+					return static_cast<T *>(p);
+			}
+			return static_cast<T *>(::operator new(n * sizeof(T)));
+		}
+
+		void deallocate(T *p, size_t n) noexcept {
+			if (!p)
+				return;
+			if (n == 1) {
+				JitNodePool<sizeof(T)>::Free(p);
+				return;
+			}
+			::operator delete(p);
+		}
+
+		template <typename U>
+		bool operator==(const JitPoolAllocator<U> &) const noexcept { return true; }
+		template <typename U>
+		bool operator!=(const JitPoolAllocator<U> &) const noexcept { return false; }
+	};
+
+	std::unordered_multimap<u32, int, std::hash<u32>, std::equal_to<u32>, JitPoolAllocator<std::pair<const u32, int>>> proxyBlockMap_;
+	int num_blocks_;
+	std::unordered_multimap<u32, int, std::hash<u32>, std::equal_to<u32>, JitPoolAllocator<std::pair<const u32, int>>> links_to_;
+	std::map<std::pair<u32,u32>, u32, std::less<std::pair<u32,u32>>, JitPoolAllocator<std::pair<const std::pair<u32,u32>, u32>>> block_map_; // (end_addr, start_addr) -> number
+#else
 	std::unordered_multimap<u32, int> proxyBlockMap_;
 
 	int num_blocks_;
 	std::unordered_multimap<u32, int> links_to_;
 	std::map<std::pair<u32,u32>, u32> block_map_; // (end_addr, start_addr) -> number
+#endif
 
 	enum {
 		JITBLOCK_RANGE_SCRATCH = 0,

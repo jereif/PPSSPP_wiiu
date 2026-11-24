@@ -425,7 +425,9 @@ public:
 		colorBuffer.surface.width = desc.width;
 		colorBuffer.surface.height = desc.height;
 		colorBuffer.surface.depth = 1;
+		colorBuffer.surface.mipLevels = 1;
 		colorBuffer.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+		colorBuffer.surface.aa = GX2_AA_MODE1X;
 		colorBuffer.surface.tileMode = GX2_TILE_MODE_DEFAULT;
 		colorBuffer.surface.use = (GX2SurfaceUse)(GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_TEXTURE);
 		colorBuffer.viewNumSlices = 1;
@@ -437,21 +439,21 @@ public:
 		case FBO_8888: colorBuffer.surface.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8; break;
 		}
 		GX2CalcSurfaceSizeAndAlignment(&colorBuffer.surface);
-		GX2InitColorBufferRegs(&colorBuffer);
 
 		colorBuffer.surface.image = MEM1_alloc(colorBuffer.surface.imageSize, colorBuffer.surface.alignment);
-		if(colorBuffer.surface.image)
-			colorBuffer.surface.use = (GX2SurfaceUse)(colorBuffer.surface.use | GX2R_RESOURCE_USAGE_FORCE_MEM1);
-		else
-		{
+		if (colorBuffer.surface.image) {
+			colorInMem1_ = true;
+		} else {
 			colorBuffer.surface.image = MEM2_alloc(colorBuffer.surface.imageSize, colorBuffer.surface.alignment);
 			_assert_(colorBuffer.surface.image);
-			colorBuffer.surface.use = (GX2SurfaceUse)(colorBuffer.surface.use | GX2R_RESOURCE_USAGE_FORCE_MEM2);
+			colorInMem1_ = false;
 		}
+		GX2InitColorBufferRegs(&colorBuffer);
 		GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, colorBuffer.surface.image, colorBuffer.surface.imageSize);
 
 		colorTexture.surface = colorBuffer.surface;
 		colorTexture.compMap = desc.colorDepth == FBO_565 ? GX2_COMP_SEL(_r, _g, _b, _1) : GX2_COMP_SEL(_r, _g, _b, _a);
+		colorTexture.viewNumMips = 1;
 		colorTexture.viewNumSlices = 1;
 		GX2InitTextureRegs(&colorTexture);
 
@@ -459,27 +461,33 @@ public:
 			depthBuffer.surface.width = desc.width;
 			depthBuffer.surface.height = desc.height;
 			depthBuffer.surface.depth = 1;
+			depthBuffer.surface.mipLevels = 1;
 			depthBuffer.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+			depthBuffer.surface.aa = GX2_AA_MODE1X;
 			depthBuffer.surface.tileMode = GX2_TILE_MODE_DEFAULT;
 			depthBuffer.surface.use = (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE);
 			depthBuffer.viewNumSlices = 1;
+			depthBuffer.hiZPtr = nullptr;
+			depthBuffer.hiZSize = 0;
+			depthBuffer.depthClear = 1.0f;
+			depthBuffer.stencilClear = 0;
 			depthBuffer.surface.format = GX2_SURFACE_FORMAT_UNORM_D24_S8;
 			GX2CalcSurfaceSizeAndAlignment(&depthBuffer.surface);
-			GX2InitDepthBufferRegs(&depthBuffer);
 
 			depthBuffer.surface.image = MEM1_alloc(depthBuffer.surface.imageSize, depthBuffer.surface.alignment);
-			if(depthBuffer.surface.image)
-				depthBuffer.surface.use = (GX2SurfaceUse)(depthBuffer.surface.use | GX2R_RESOURCE_USAGE_FORCE_MEM1);
-			else
-			{
+			if (depthBuffer.surface.image) {
+				depthInMem1_ = true;
+			} else {
 				depthBuffer.surface.image = MEM2_alloc(depthBuffer.surface.imageSize, depthBuffer.surface.alignment);
 				_assert_(depthBuffer.surface.image);
-				depthBuffer.surface.use = (GX2SurfaceUse)(depthBuffer.surface.use | GX2R_RESOURCE_USAGE_FORCE_MEM2);
+				depthInMem1_ = false;
 			}
+			GX2InitDepthBufferRegs(&depthBuffer);
 			GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER, depthBuffer.surface.image, depthBuffer.surface.imageSize);
 
 			depthTexture.surface = depthBuffer.surface;
 			depthTexture.compMap = GX2_COMP_SEL(_x, _y, _0, _0);
+			depthTexture.viewNumMips = 1;
 			depthTexture.viewNumSlices = 1;
 			GX2InitTextureRegs(&depthTexture);
 		}
@@ -496,15 +504,19 @@ public:
 
 	}
 	~GX2Framebuffer() {
-		if (colorBuffer.surface.use & GX2R_RESOURCE_USAGE_FORCE_MEM1)
-			MEM1_free(colorBuffer.surface.image);
-		else
-			MEM2_free(colorBuffer.surface.image);
+		if (colorBuffer.surface.image) {
+			if (colorInMem1_)
+				MEM1_free(colorBuffer.surface.image);
+			else
+				MEM2_free(colorBuffer.surface.image);
+		}
 
-		if (depthBuffer.surface.use & GX2R_RESOURCE_USAGE_FORCE_MEM1)
-			MEM1_free(depthBuffer.surface.image);
-		else
-			MEM2_free(depthBuffer.surface.image);
+		if (depthBuffer.surface.image) {
+			if (depthInMem1_)
+				MEM1_free(depthBuffer.surface.image);
+			else
+				MEM2_free(depthBuffer.surface.image);
+		}
 #if 0
 		DEBUG_STR(tag.c_str());
 		DEBUG_VAR2(MEM1_avail());
@@ -515,6 +527,8 @@ public:
 	GX2DepthBuffer depthBuffer = {};
 	GX2Texture colorTexture = {};
 	GX2Texture depthTexture = {};
+	bool colorInMem1_ = false;
+	bool depthInMem1_ = false;
 	std::string tag;
 };
 
@@ -591,7 +605,16 @@ public:
 	void SetScissorRect(int left, int top, int width, int height) override { GX2SetScissor(left, top, width, height); }
 	void SetViewports(int count, Viewport *viewports) override {
 		assert(count == 1);
-		GX2SetViewport(viewports->TopLeftX, viewports->TopLeftY, viewports->Width, viewports->Height, viewports->MinDepth, viewports->MaxDepth);
+		GX2ViewportReg vpReg;
+		GX2InitViewportReg(&vpReg, viewports->TopLeftX, viewports->TopLeftY, viewports->Width, viewports->Height, viewports->MinDepth, viewports->MaxDepth);
+		// GX2InitViewportReg maps OpenGL [-1, 1] NDC Z to [MinDepth, MaxDepth],
+		// whereas PPSSPP outputs Direct3D [0, 1] clip Z (with HalfZ enabled).
+		// Override zscale/zoffset so [0, 1] maps linearly to [MinDepth, MaxDepth].
+		float zscale = viewports->MaxDepth - viewports->MinDepth;
+		float zoffset = viewports->MinDepth;
+		memcpy(&vpReg.pa_cl_vport_zscale, &zscale, sizeof(float));
+		memcpy(&vpReg.pa_cl_vport_zoffset, &zoffset, sizeof(float));
+		GX2SetViewportReg(&vpReg);
 		// needed to prevent overwriting memory outside the rendertarget;
 		// TODO: check and set this during draw calls instead.
 		GX2SetScissor(0, 0, current_color_buffer_->surface.width, current_color_buffer_->surface.height);
@@ -635,10 +658,10 @@ public:
 		switch (obj) {
 		case NativeObject::CONTEXT: return (uintptr_t)context_state_;
 		case NativeObject::BACKBUFFER_COLOR_VIEW: return current_color_buffer_? (uintptr_t)current_color_buffer_ : (uintptr_t)color_buffer_;
+		case NativeObject::BACKBUFFER_DEPTH_VIEW: return current_depth_buffer_? (uintptr_t)current_depth_buffer_ : (uintptr_t)depth_buffer_;
 		case NativeObject::CONTEXT_EX:
 		case NativeObject::DEVICE:
 		case NativeObject::DEVICE_EX:
-		case NativeObject::BACKBUFFER_DEPTH_VIEW:
 		case NativeObject::BACKBUFFER_COLOR_TEX:
 		case NativeObject::BACKBUFFER_DEPTH_TEX:
 		case NativeObject::FEATURE_LEVEL:
@@ -916,8 +939,17 @@ void GX2DrawContext::CopyFramebufferImage(Framebuffer *srcfb, int level, int x, 
 		srcSurface = &((GX2Framebuffer *)srcfb)->depthBuffer.surface;
 		dstSurface = &((GX2Framebuffer *)dstfb)->depthBuffer.surface;
 	}
-	GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, srcSurface->image, srcSurface->imageSize);
+	if (channelBit == Draw::FB_COLOR_BIT) {
+		GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, srcSurface->image, srcSurface->imageSize);
+	} else {
+		GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER, srcSurface->image, srcSurface->imageSize);
+	}
 	GX2CopySurfaceEx(srcSurface, level, z, dstSurface, dstLevel, dstZ, 1, &srcRegion, &dstCoords);
+	if (channelBit == Draw::FB_COLOR_BIT) {
+		GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, dstSurface->image, dstSurface->imageSize);
+	} else {
+		GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER, dstSurface->image, dstSurface->imageSize);
+	}
 	GX2SetContextState(context_state_);
 	GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
 }

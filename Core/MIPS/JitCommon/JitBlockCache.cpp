@@ -104,8 +104,20 @@ void JitBlockCache::Shutdown() {
 void JitBlockCache::Clear() {
 	block_map_.clear();
 	proxyBlockMap_.clear();
-	for (int i = 0; i < num_blocks_; i++)
-		DestroyBlock(i, DestroyType::CLEAR);
+	for (int i = 0; i < num_blocks_; i++) {
+		JitBlock &b = blocks_[i];
+		if (b.proxyFor) {
+			delete b.proxyFor;
+			b.proxyFor = 0;
+		}
+		if (!b.invalid) {
+			b.invalid = true;
+			if (!b.IsPureProxy()) {
+				if (Memory::ReadUnchecked_U32(b.originalAddress) == GetEmuHackOpForBlock(i).encoding)
+					Memory::Write_Opcode_JIT(b.originalAddress, b.originalFirstOpcode);
+			}
+		}
+	}
 	links_to_.clear();
 	num_blocks_ = 0;
 
