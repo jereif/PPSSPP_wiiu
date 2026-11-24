@@ -169,18 +169,41 @@ void IndexGenerator::AddStrip(int numVerts, bool clockwise) {
 #else
 	// Slow fallback loop.
 	int wind = clockwise ? 1 : 2;
-	int ibase = index_;
+	int windAlt = wind ^ 3;
+	u32 ibase = (u32)index_;
 	size_t numPairs = numTris / 2;
 	u16 *outInds = inds_;
-	while (numPairs > 0) {
-		*outInds++ = ibase;
-		*outInds++ = ibase + wind;
-		*outInds++ = ibase + (wind ^ 3);
-		*outInds++ = ibase + 1;
-		*outInds++ = ibase + 1 + (wind ^ 3);
-		*outInds++ = ibase + 1 + wind;
-		ibase += 2;
-		numPairs--;
+#if defined(__wiiu__) || defined(__BIG_ENDIAN__)
+	if (((uintptr_t)outInds & 3) == 0) {
+		u32 *out32 = (u32 *)outInds;
+		while (numPairs > 0) {
+			u32 a = ibase;
+			u32 b = a + wind;
+			u32 c = a + windAlt;
+			u32 d = a + 1;
+			u32 e = d + windAlt;
+			u32 f = d + wind;
+			out32[0] = (a << 16) | b;
+			out32[1] = (c << 16) | d;
+			out32[2] = (e << 16) | f;
+			out32 += 3;
+			ibase += 2;
+			numPairs--;
+		}
+		outInds = (u16 *)out32;
+	} else
+#endif
+	{
+		while (numPairs > 0) {
+			*outInds++ = ibase;
+			*outInds++ = ibase + wind;
+			*outInds++ = ibase + windAlt;
+			*outInds++ = ibase + 1;
+			*outInds++ = ibase + 1 + windAlt;
+			*outInds++ = ibase + 1 + wind;
+			ibase += 2;
+			numPairs--;
+		}
 	}
 	if (numTris & 1) {
 		*outInds++ = ibase;

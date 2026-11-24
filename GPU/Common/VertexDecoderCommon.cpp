@@ -148,18 +148,148 @@ static inline void SkinPosNormPS(const float *weights, int nw, const float *bone
 		: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
 		  "fr8", "fr9", "fr10", "fr11", "fr12", "cr0", "ctr", "memory");
 }
-#endif
 
-// Zero-branch specialized inner loop for hot non-skinned vertex formats.
+// Direct u8-weight fused in-register Paired-Singles software skinning:
+// Skips zero weights in 2 integer cycles (no stack weights[8], no LUT load, no FPU compare),
+// receives pos/nrm directly in FPRs (zero stack round-trip), accumulates bones in fr0..fr7.
+template <bool HAS_NRM>
+static inline void SkinPosNormU8PS(
+	const u8 *wPtr, int nw, const float *u8Lut, const float *boneBase,
+	float px, float py, float pz, float *outPos,
+	float nx, float ny, float nz, float *outNrm) {
+	const float zero = 0.0f;
+	const u8 *w = wPtr;
+	const float *b = boneBase;
+	u32 tmp = 0;
+	if (HAS_NRM) {
+		asm volatile(
+			".machine push\n\t"
+			".machine gekko\n\t"
+			"ps_merge00 0, %[z], %[z]\n\t"
+			"ps_merge00 1, %[z], %[z]\n\t"
+			"ps_merge00 2, %[z], %[z]\n\t"
+			"ps_merge00 3, %[z], %[z]\n\t"
+			"ps_merge00 4, %[z], %[z]\n\t"
+			"ps_merge00 5, %[z], %[z]\n\t"
+			"ps_merge00 6, %[z], %[z]\n\t"
+			"ps_merge00 7, %[z], %[z]\n\t"
+			"mtctr     %[nw]\n\t"
+			"1:\n\t"
+			"lbz       %[tmp], 0(%[w])\n\t"
+			"addi      %[w], %[w], 1\n\t"
+			"cmpwi     0, %[tmp], 0\n\t"
+			"beq       0, 2f\n\t"
+			"slwi      %[tmp], %[tmp], 2\n\t"
+			"lfsx      12, %[lut], %[tmp]\n\t"
+			"psq_l      8,  0(%[b]), 0, 0\n\t"
+			"lfs        9,  8(%[b])\n\t"
+			"psq_l     10, 12(%[b]), 0, 0\n\t"
+			"lfs       11, 20(%[b])\n\t"
+			"ps_madds0  0,  8, 12, 0\n\t"
+			"ps_madds0  1,  9, 12, 1\n\t"
+			"ps_madds0  2, 10, 12, 2\n\t"
+			"ps_madds0  3, 11, 12, 3\n\t"
+			"psq_l      8, 24(%[b]), 0, 0\n\t"
+			"lfs        9, 32(%[b])\n\t"
+			"psq_l     10, 36(%[b]), 0, 0\n\t"
+			"lfs       11, 44(%[b])\n\t"
+			"ps_madds0  4,  8, 12, 4\n\t"
+			"ps_madds0  5,  9, 12, 5\n\t"
+			"ps_madds0  6, 10, 12, 6\n\t"
+			"ps_madds0  7, 11, 12, 7\n\t"
+			"2:\n\t"
+			"addi      %[b], %[b], 48\n\t"
+			"bdnz      1b\n\t"
+			"ps_madds0  8, 0, %[px], 6\n\t"
+			"ps_madds0  9, 1, %[px], 7\n\t"
+			"ps_madds0  8, 2, %[py], 8\n\t"
+			"ps_madds0  9, 3, %[py], 9\n\t"
+			"ps_madds0  8, 4, %[pz], 8\n\t"
+			"ps_madds0  9, 5, %[pz], 9\n\t"
+			"psq_st     8, 0(%[op]), 0, 0\n\t"
+			"stfs       9, 8(%[op])\n\t"
+			"ps_muls0   8, 0, %[nx]\n\t"
+			"ps_muls0   9, 1, %[nx]\n\t"
+			"ps_madds0  8, 2, %[ny], 8\n\t"
+			"ps_madds0  9, 3, %[ny], 9\n\t"
+			"ps_madds0  8, 4, %[nz], 8\n\t"
+			"ps_madds0  9, 5, %[nz], 9\n\t"
+			"psq_st     8, 0(%[on]), 0, 0\n\t"
+			"stfs       9, 8(%[on])\n\t"
+			".machine pop\n\t"
+			: [w] "+b"(w), [b] "+b"(b), [tmp] "=&r"(tmp)
+			: [nw] "r"(nw), [lut] "b"(u8Lut), [z] "f"(zero),
+			  [px] "f"(px), [py] "f"(py), [pz] "f"(pz), [op] "b"(outPos),
+			  [nx] "f"(nx), [ny] "f"(ny), [nz] "f"(nz), [on] "b"(outNrm)
+			: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
+			  "fr8", "fr9", "fr10", "fr11", "fr12", "cr0", "ctr", "memory");
+	} else {
+		asm volatile(
+			".machine push\n\t"
+			".machine gekko\n\t"
+			"ps_merge00 0, %[z], %[z]\n\t"
+			"ps_merge00 1, %[z], %[z]\n\t"
+			"ps_merge00 2, %[z], %[z]\n\t"
+			"ps_merge00 3, %[z], %[z]\n\t"
+			"ps_merge00 4, %[z], %[z]\n\t"
+			"ps_merge00 5, %[z], %[z]\n\t"
+			"ps_merge00 6, %[z], %[z]\n\t"
+			"ps_merge00 7, %[z], %[z]\n\t"
+			"mtctr     %[nw]\n\t"
+			"1:\n\t"
+			"lbz       %[tmp], 0(%[w])\n\t"
+			"addi      %[w], %[w], 1\n\t"
+			"cmpwi     0, %[tmp], 0\n\t"
+			"beq       0, 2f\n\t"
+			"slwi      %[tmp], %[tmp], 2\n\t"
+			"lfsx      12, %[lut], %[tmp]\n\t"
+			"psq_l      8,  0(%[b]), 0, 0\n\t"
+			"lfs        9,  8(%[b])\n\t"
+			"psq_l     10, 12(%[b]), 0, 0\n\t"
+			"lfs       11, 20(%[b])\n\t"
+			"ps_madds0  0,  8, 12, 0\n\t"
+			"ps_madds0  1,  9, 12, 1\n\t"
+			"ps_madds0  2, 10, 12, 2\n\t"
+			"ps_madds0  3, 11, 12, 3\n\t"
+			"psq_l      8, 24(%[b]), 0, 0\n\t"
+			"lfs        9, 32(%[b])\n\t"
+			"psq_l     10, 36(%[b]), 0, 0\n\t"
+			"lfs       11, 44(%[b])\n\t"
+			"ps_madds0  4,  8, 12, 4\n\t"
+			"ps_madds0  5,  9, 12, 5\n\t"
+			"ps_madds0  6, 10, 12, 6\n\t"
+			"ps_madds0  7, 11, 12, 7\n\t"
+			"2:\n\t"
+			"addi      %[b], %[b], 48\n\t"
+			"bdnz      1b\n\t"
+			"ps_madds0  8, 0, %[px], 6\n\t"
+			"ps_madds0  9, 1, %[px], 7\n\t"
+			"ps_madds0  8, 2, %[py], 8\n\t"
+			"ps_madds0  9, 3, %[py], 9\n\t"
+			"ps_madds0  8, 4, %[pz], 8\n\t"
+			"ps_madds0  9, 5, %[pz], 9\n\t"
+			"psq_st     8, 0(%[op]), 0, 0\n\t"
+			"stfs       9, 8(%[op])\n\t"
+			".machine pop\n\t"
+			: [w] "+b"(w), [b] "+b"(b), [tmp] "=&r"(tmp)
+			: [nw] "r"(nw), [lut] "b"(u8Lut), [z] "f"(zero),
+			  [px] "f"(px), [py] "f"(py), [pz] "f"(pz), [op] "b"(outPos)
+			: "fr0", "fr1", "fr2", "fr3", "fr4", "fr5", "fr6", "fr7",
+			  "fr8", "fr9", "fr10", "fr11", "fr12", "cr0", "ctr", "memory");
+	}
+}
+
+// Zero-branch specialized inner loop for hot u8-weight software-skinned vertex formats.
 template <int TC, int COL, int NRM, int POS>
-static void DecodeNonSkinnedT(
+static void DecodeSkinnedU8T(
 	const u8 * __restrict p, u8 * __restrict d, int count,
-	int inSize, int stride,
+	int inSize, int stride, int nw,
 	int tcOff, int uvOff, float uMul, float vMul, float uAdd, float vAdd,
 	int cOff, int dc0Off, int nOff, int dnOff, int pOff, int dpOff,
 	bool &fullAlpha) {
+	const float * __restrict u8Lut = GetU8Div128Lut();
 	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
-	const float * __restrict u8Lut = (TC == 1) ? GetU8Div128Lut() : nullptr;
+	const float * __restrict boneBase = gstate.boneMatrix;
 	for (; count > 0; --count) {
 		if (TC == 2) {
 			float *uv = (float *)(d + uvOff);
@@ -181,47 +311,148 @@ static void DecodeNonSkinnedT(
 			fullAlpha &= ((cdata >> 24) == 0xFF);
 			*(u32_le *)(d + dc0Off) = cdata;
 		}
+		float nx = 0.0f, ny = 0.0f, nz = 0.0f;
 		if (NRM == 1) {
-			float *no = (float *)(d + dnOff);
 			const u8 *sv = p + nOff;
+			nx = s8Lut[sv[0]];
+			ny = s8Lut[sv[1]];
+			nz = s8Lut[sv[2]];
+		} else if (NRM == 2) {
+			const s16_le *sv = (const s16_le *)(p + nOff);
+			nx = (float)sv[0] * (1.0f / 32768.0f);
+			ny = (float)sv[1] * (1.0f / 32768.0f);
+			nz = (float)sv[2] * (1.0f / 32768.0f);
+		} else if (NRM == 3) {
+			const float_le *fv = (const float_le *)(p + nOff);
+			nx = fv[0];
+			ny = fv[1];
+			nz = fv[2];
+		}
+		float px, py, pz;
+		if (POS == 2) {
+			const s16_le *pv = (const s16_le *)(p + pOff);
+			px = (float)pv[0] * (1.0f / 32768.0f);
+			py = (float)pv[1] * (1.0f / 32768.0f);
+			pz = (float)pv[2] * (1.0f / 32768.0f);
+		} else if (POS == 3) {
+			const float_le *pv = (const float_le *)(p + pOff);
+			px = pv[0];
+			py = pv[1];
+			pz = pv[2];
+		} else {
+			const u8 *pv = p + pOff;
+			px = s8Lut[pv[0]];
+			py = s8Lut[pv[1]];
+			pz = s8Lut[pv[2]];
+		}
+		SkinPosNormU8PS<NRM != 0>(p, nw, u8Lut, boneBase,
+			px, py, pz, (float *)(d + dpOff),
+			nx, ny, nz, (float *)(d + dnOff));
+		p += inSize;
+		d += stride;
+	}
+}
+#endif
+
+// Zero-branch specialized inner loop (2x unrolled to hide PPC int->float store-forwarding stalls).
+template <int TC, int COL, int NRM, int POS>
+static void DecodeNonSkinnedT(
+	const u8 * __restrict p, u8 * __restrict d, int count,
+	int inSize, int stride,
+	int tcOff, int uvOff, float uMul, float vMul, float uAdd, float vAdd,
+	int cOff, int dc0Off, int nOff, int dnOff, int pOff, int dpOff,
+	bool &fullAlpha) {
+	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
+	const float * __restrict u8Lut = (TC == 1) ? GetU8Div128Lut() : nullptr;
+	auto decodeOne = [&](const u8 * __restrict sp, u8 * __restrict sd) {
+		if (TC == 2) {
+			float *uv = (float *)(sd + uvOff);
+			const u16_le *uv16 = (const u16_le *)(sp + tcOff);
+			uv[0] = (float)uv16[0] * uMul + uAdd;
+			uv[1] = (float)uv16[1] * vMul + vAdd;
+		} else if (TC == 1) {
+			float *uv = (float *)(sd + uvOff);
+			uv[0] = u8Lut[sp[tcOff]] * uMul + uAdd;
+			uv[1] = u8Lut[sp[tcOff + 1]] * vMul + vAdd;
+		} else if (TC == 3) {
+			float *uv = (float *)(sd + uvOff);
+			const float_le *uvf = (const float_le *)(sp + tcOff);
+			uv[0] = uvf[0] * uMul + uAdd;
+			uv[1] = uvf[1] * vMul + vAdd;
+		}
+		if (COL == 7) {
+			u32 cdata = *(const u32_le *)(sp + cOff);
+			fullAlpha &= ((cdata >> 24) == 0xFF);
+			*(u32_le *)(sd + dc0Off) = cdata;
+		} else if (COL == 6) {
+			u16 cdata = *(const u16_le *)(sp + cOff);
+			fullAlpha &= ((cdata >> 12) == 0xF);
+			*(u32_le *)(sd + dc0Off) = Convert4To8(cdata & 0xF) |
+				(Convert4To8((cdata >> 4) & 0xF) << 8) |
+				(Convert4To8((cdata >> 8) & 0xF) << 16) |
+				(Convert4To8((cdata >> 12) & 0xF) << 24);
+		} else if (COL == 5) {
+			u16 cdata = *(const u16_le *)(sp + cOff);
+			fullAlpha &= ((cdata >> 15) != 0);
+			*(u32_le *)(sd + dc0Off) = Convert5To8(cdata & 0x1f) |
+				(Convert5To8((cdata >> 5) & 0x1f) << 8) |
+				(Convert5To8((cdata >> 10) & 0x1f) << 16) |
+				((cdata >> 15) ? (255u << 24) : 0);
+		} else if (COL == 4) {
+			u16 cdata = *(const u16_le *)(sp + cOff);
+			*(u32_le *)(sd + dc0Off) = Convert5To8(cdata & 0x1f) |
+				(Convert6To8((cdata >> 5) & 0x3f) << 8) |
+				(Convert5To8((cdata >> 11) & 0x1f) << 16) |
+				(255u << 24);
+		}
+		if (NRM == 1) {
+			float *no = (float *)(sd + dnOff);
+			const u8 *sv = sp + nOff;
 			no[0] = s8Lut[sv[0]];
 			no[1] = s8Lut[sv[1]];
 			no[2] = s8Lut[sv[2]];
 		} else if (NRM == 2) {
-			s16 *no = (s16 *)(d + dnOff);
-			const s16_le *sv = (const s16_le *)(p + nOff);
+			s16 *no = (s16 *)(sd + dnOff);
+			const s16_le *sv = (const s16_le *)(sp + nOff);
 			no[0] = sv[0];
 			no[1] = sv[1];
 			no[2] = sv[2];
 			no[3] = 0;
 		} else if (NRM == 3) {
-			u32 *no = (u32 *)(d + dnOff);
-			const u32_le *fv = (const u32_le *)(p + nOff);
+			u32 *no = (u32 *)(sd + dnOff);
+			const u32_le *fv = (const u32_le *)(sp + nOff);
 			no[0] = fv[0];
 			no[1] = fv[1];
 			no[2] = fv[2];
 		}
 		if (POS == 2) {
-			float *po = (float *)(d + dpOff);
-			const s16_le *pv = (const s16_le *)(p + pOff);
+			float *po = (float *)(sd + dpOff);
+			const s16_le *pv = (const s16_le *)(sp + pOff);
 			po[0] = (float)pv[0] * (1.0f / 32768.0f);
 			po[1] = (float)pv[1] * (1.0f / 32768.0f);
 			po[2] = (float)pv[2] * (1.0f / 32768.0f);
 		} else if (POS == 3) {
-			u32 *po = (u32 *)(d + dpOff);
-			const u32_le *pv = (const u32_le *)(p + pOff);
+			u32 *po = (u32 *)(sd + dpOff);
+			const u32_le *pv = (const u32_le *)(sp + pOff);
 			po[0] = pv[0];
 			po[1] = pv[1];
 			po[2] = pv[2];
 		} else {
-			float *po = (float *)(d + dpOff);
-			const u8 *pv = p + pOff;
+			float *po = (float *)(sd + dpOff);
+			const u8 *pv = sp + pOff;
 			po[0] = s8Lut[pv[0]];
 			po[1] = s8Lut[pv[1]];
 			po[2] = s8Lut[pv[2]];
 		}
-		p += inSize;
-		d += stride;
+	};
+	for (; count >= 2; count -= 2) {
+		decodeOne(p, d);
+		decodeOne(p + inSize, d + stride);
+		p += inSize * 2;
+		d += stride * 2;
+	}
+	if (count) {
+		decodeOne(p, d);
 	}
 }
 
@@ -1619,8 +1850,42 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 		const float * __restrict s8Lut = GetS8Div128Lut();
 		const float * __restrict u8Lut = GetU8Div128Lut();
 
+		// Zero-branch specialized dispatch for the hottest u8-weight software-skinned formats.
+#ifdef __wiiu__
+		if (swSkin && wt == 1 && (colFmt == 0 || colFmt == 7) && (posFmt == 2 || posFmt == 3)) {
+			const float tcUMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.uScale : 1.0f) : uMul;
+			const float tcVMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.vScale : 1.0f) : vMul;
+			const u32 key = (tcFmt << 8) | (colFmt << 4) | (nrmFmt << 2) | posFmt;
+			bool handled = true;
+			switch (key) {
+#define DISPATCH_SK(T, C, N, P) \
+	case ((T << 8) | (C << 4) | (N << 2) | P): \
+		DecodeSkinnedU8T<T, C, N, P>(p, d, count, inSize, stride, nw, tcOff, uvOff, tcUMul, tcVMul, uAdd, vAdd, cOff, dc0Off, nOff, dnOff, pOff, dpOff, fullAlpha); \
+		break
+			DISPATCH_SK(2, 0, 1, 2);
+			DISPATCH_SK(2, 7, 1, 2);
+			DISPATCH_SK(2, 0, 0, 2);
+			DISPATCH_SK(2, 7, 0, 2);
+			DISPATCH_SK(2, 0, 2, 2);
+			DISPATCH_SK(2, 0, 1, 3);
+			DISPATCH_SK(3, 0, 3, 3);
+			DISPATCH_SK(3, 0, 1, 3);
+			DISPATCH_SK(0, 0, 1, 2);
+			DISPATCH_SK(0, 0, 0, 2);
+#undef DISPATCH_SK
+			default:
+				handled = false;
+				break;
+			}
+			if (handled) {
+				gstate_c.vertexFullAlpha = fullAlpha;
+				return;
+			}
+		}
+#endif
+
 		// Zero-branch specialized dispatch for the hottest non-skinned PSP vertex formats.
-		if (!wt && (colFmt == 0 || colFmt == 7) && (posFmt == 2 || posFmt == 3)) {
+		if (!wt && (colFmt == 0 || colFmt >= 4)) {
 			const float tcUMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.uScale : 1.0f) : uMul;
 			const float tcVMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.vScale : 1.0f) : vMul;
 			const u32 key = (tcFmt << 8) | (colFmt << 4) | (nrmFmt << 2) | posFmt;
@@ -1634,6 +1899,12 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 			DISPATCH_NS(2, 7, 1, 2);
 			DISPATCH_NS(2, 0, 0, 2);
 			DISPATCH_NS(2, 7, 0, 2);
+			DISPATCH_NS(2, 6, 0, 2);
+			DISPATCH_NS(2, 5, 0, 2);
+			DISPATCH_NS(2, 4, 0, 2);
+			DISPATCH_NS(2, 6, 1, 2);
+			DISPATCH_NS(2, 5, 1, 2);
+			DISPATCH_NS(2, 4, 1, 2);
 			DISPATCH_NS(2, 0, 2, 2);
 			DISPATCH_NS(2, 7, 2, 2);
 			DISPATCH_NS(2, 0, 1, 3);
@@ -1646,11 +1917,18 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 			DISPATCH_NS(3, 7, 1, 3);
 			DISPATCH_NS(0, 7, 0, 2);
 			DISPATCH_NS(0, 7, 0, 3);
+			DISPATCH_NS(0, 6, 0, 2);
+			DISPATCH_NS(0, 5, 0, 2);
+			DISPATCH_NS(0, 4, 0, 2);
 			DISPATCH_NS(0, 0, 1, 2);
 			DISPATCH_NS(0, 0, 0, 2);
 			DISPATCH_NS(0, 0, 0, 3);
 			DISPATCH_NS(1, 7, 0, 2);
 			DISPATCH_NS(1, 0, 1, 2);
+			DISPATCH_NS(1, 7, 0, 1);
+			DISPATCH_NS(2, 0, 1, 1);
+			DISPATCH_NS(2, 7, 1, 1);
+			DISPATCH_NS(2, 7, 0, 1);
 #undef DISPATCH_NS
 			default:
 				handled = false;
