@@ -11,6 +11,7 @@
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/MIPS/MIPSInt.h"
 #include "Core/MIPS/MIPSTables.h"
+#include "Core/HLE/ReplaceTables.h"
 
 #include "PpcRegCache.h"
 #include "ppcEmitter.h"
@@ -309,13 +310,33 @@ void Jit::Comp_RunBlock(MIPSOpcode op) {
 
 void Jit::Comp_ReplacementFunc(MIPSOpcode op)
 {
-	// None of the code of this function is relevant so we'll just
-	// call the replacement and move RA to PC.
-	int replacementFunc = op & 0xFFFFFFF;
+	int index = op.encoding & MIPS_EMUHACK_VALUE_MASK;
+	const ReplacementTableEntry *entry = GetReplacementFunc(index);
+	if (!entry) {
+		ERROR_LOG(HLE, "Invalid replacement op %08x", op.encoding);
+		return;
+	}
 
-
-	// We could even do this in the jal that is branching to the function
-	// but having the op is necessary for the interpreter anyway.
+	bool disabled = (entry->flags & REPFLAG_DISABLED) != 0;
+	if (disabled) {
+		MIPSCompileOp(Memory::Read_Instruction(js.compilerPC, true), this);
+	} else if (entry->replaceFunc) {
+		FlushAll();
+		MOVI2R(SREG, js.compilerPC);
+		MovToPC(SREG);
+		QuickCallFunction((void *)entry->replaceFunc);
+		if (entry->flags & (REPFLAG_HOOKENTER | REPFLAG_HOOKEXIT)) {
+			MIPSCompileOp(Memory::Read_Instruction(js.compilerPC, true), this);
+		} else {
+			// R3 holds the cycle count returned by entry->replaceFunc.
+			SUBF(DCNTREG, R3, DCNTREG);
+			LWZ(FLAGREG, CTXREG, MIPS_REG_RA * 4);
+			WriteExitDestInR(FLAGREG);
+			js.compiling = false;
+		}
+	} else {
+		MIPSCompileOp(Memory::Read_Instruction(js.compilerPC, true), this);
+	}
 }
 
 void Jit::Comp_DoNothing(MIPSOpcode op) {

@@ -217,9 +217,9 @@ void Jit::GenerateFixedCode() {
 			// R4 = R3 & MIPS_EMUHACK_VALUE_MASK
 			RLWINM(R4, R3, 0, 8, 31);
 
-			// compare top 6 bits == MIPS_EMUHACK_OPCODE >> 26
-			SRWI(R3, R3, 26);
-			CMPLI(R3, MIPS_EMUHACK_OPCODE >> 26);
+			// compare top 8 bits == MIPS_EMUHACK_OPCODE >> 24 (RUNBLOCK only, not CALL_REPLACEMENT)
+			SRWI(R3, R3, 24);
+			CMPLI(R3, MIPS_EMUHACK_OPCODE >> 24);
 
 			// Branch if func block not found 
 			FixupBranch notfound = BNE();
