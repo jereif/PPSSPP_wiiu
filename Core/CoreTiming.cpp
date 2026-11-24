@@ -30,6 +30,9 @@
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceDisplay.h"
 #include "Core/MIPS/MIPS.h"
+#ifdef __wiiu__
+#include "WiiU/WiiUAsyncGPU.h"
+#endif
 #include "Core/Reporting.h"
 
 static const int initialHz = 222000000;
@@ -572,6 +575,10 @@ void Advance()
 	int cyclesExecuted = slicelength - currentMIPS->downcount;
 	globalTimer += cyclesExecuted;
 	currentMIPS->downcount = slicelength;
+#ifdef __wiiu__
+	WiiUAsyncGPU::SetLastCpuTicks(globalTimer);
+	WiiUAsyncGPU::DrainGeEvents();
+#endif
 
 	if (hasTsEvents.load(std::memory_order_acquire))
 		MoveEvents();

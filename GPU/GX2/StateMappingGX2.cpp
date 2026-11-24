@@ -414,18 +414,22 @@ void DrawEngineGX2::ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef)
 	}
 	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
 		// Need to do this AFTER ApplyTexture because the process of depallettization can ruin the blend state.
-		float blendColor[4];
-		Uint8x4ToFloat4(blendColor, dynState_.blendColor);
 		GX2SetBlendControlReg(&blendState_->blend);
 		GX2SetColorControlReg(&blendState_->color);
 		GX2SetTargetChannelMasksReg(&blendState_->mask);
-		GX2SetBlendConstantColorReg((GX2BlendConstantColorReg *)blendColor);
+		if (dynState_.useBlendColor) {
+			float blendColor[4];
+			Uint8x4ToFloat4(blendColor, dynState_.blendColor);
+			GX2SetBlendConstantColorReg((GX2BlendConstantColorReg *)blendColor);
+		}
 	}
 	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE) || applyStencilRef) {
 		GX2SetDepthStencilControlReg(depthStencilState_);
-		if (!applyStencilRef)
-			stencilRef = dynState_.stencilRef;
-		GX2SetStencilMask(keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef, keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef);
+		if (dynState_.useStencil || applyStencilRef) {
+			if (!applyStencilRef)
+				stencilRef = dynState_.stencilRef;
+			GX2SetStencilMask(keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef, keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef);
+		}
 	}
 	gstate_c.Clean(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE | DIRTY_BLEND_STATE);
 

@@ -109,6 +109,7 @@ void TextureCacheGX2::ForgetLastTexture() {
 
 void TextureCacheGX2::InvalidateLastTexture() {
 	lastBoundTexture = INVALID_TEX;
+	hasBoundSampler_ = false;
 }
 
 void TextureCacheGX2::StartFrame() {
@@ -165,14 +166,18 @@ void TextureCacheGX2::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutBase
 
 void TextureCacheGX2::BindTexture(TexCacheEntry *entry) {
 	GX2Texture *texture = (GX2Texture *)entry->texturePtr;
-	// Always rebind: GX2 context/framebuffer switches can drop the texture binding while our cached
-	// "last bound" pointer still matches, which makes the shader sample an unbound texture.
-	GX2SetPixelTexture(texture, 0);
-	lastBoundTexture = texture;
+	if (texture != lastBoundTexture) {
+		GX2SetPixelTexture(texture, 0);
+		lastBoundTexture = texture;
+	}
 	int maxLevel = (entry->status & TexCacheEntry::STATUS_BAD_MIPS) ? 0 : entry->maxLevel;
 	SamplerCacheKey samplerKey = GetSamplingParams(maxLevel, entry->addr);
-	GX2Sampler *sampler = samplerCache_.GetOrCreateSampler(samplerKey);
-	GX2SetPixelSampler(sampler, 0);
+	if (!hasBoundSampler_ || samplerKey.fullKey != lastBoundSamplerKey_.fullKey) {
+		GX2Sampler *sampler = samplerCache_.GetOrCreateSampler(samplerKey);
+		GX2SetPixelSampler(sampler, 0);
+		lastBoundSamplerKey_ = samplerKey;
+		hasBoundSampler_ = true;
+	}
 }
 
 void TextureCacheGX2::Unbind() {

@@ -3,6 +3,10 @@
 #include "WiiU/GX2GraphicsContext.h"
 #include "WiiU/WiiUHost.h"
 #include "GPU/GX2/ShaderManagerGX2.h"
+
+namespace MIPSComp {
+void PpcJitLogRuntimeFallbacks(int frames);
+}
 #include "Core/Host.h"
 
 #include "Core/System.h"
@@ -200,15 +204,21 @@ void GX2GraphicsContext::SwapBuffers() {
 		lastSwap = t2;
 		if (accCount >= 300) {
 			double jitMs = (double)ticks_to_us(g_gx2Perf.jitTicks) / (1000.0 * accCount);
+			double waitMs = (double)ticks_to_us(g_gx2Perf.cpuWaitTicks) / (1000.0 * accCount);
 			double geMs = (double)ticks_to_us(g_gx2Perf.geTicks) / (1000.0 * accCount);
 			double flushMs = (double)ticks_to_us(g_gx2Perf.flushTicks) / (1000.0 * accCount);
+			double primMs = (double)ticks_to_us(g_gx2Perf.primTicks) / (1000.0 * accCount);
+			double stateMs = (double)ticks_to_us(g_gx2Perf.stateTicks) / (1000.0 * accCount);
+			double decMs = (double)ticks_to_us(g_gx2Perf.decTicks) / (1000.0 * accCount);
 			double uboMs = (double)ticks_to_us(g_gx2Perf.uboTicks) / (1000.0 * accCount);
-			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), WaitFlip %.2f ms, jit %.2f ms (cpu %.2f, ge %.2f, flush %.2f, ubo %.2f), draws %.1f (sw %.1f, psAll %.1f)",
+			NOTICE_LOG(G3D, "perf: avg frame %.2f ms (%.1f fps), core2 %.2f (work %.2f wait %.2f | s:%u/%u/%u/%u/%u), core1-ge %.2f (prim %.2f fl %.2f [st %.2f dec %.2f ubo %.2f]), draws %.1f",
 				accFrame * 1000.0 / accCount, accCount / accFrame,
-				accFlip * 1000.0 / accCount,
-				jitMs, jitMs - geMs, geMs, flushMs, uboMs,
-				(double)g_gx2Perf.draws / accCount, (double)g_gx2Perf.swDraws / accCount,
-				(double)g_gx2Perf.psAllDraws / accCount);
+				jitMs, jitMs - waitMs, waitMs,
+				g_gx2Perf.syncEnq / accCount, g_gx2Perf.syncWait / accCount, g_gx2Perf.syncInv / accCount,
+				g_gx2Perf.syncDisp / accCount, g_gx2Perf.syncOth / accCount,
+				geMs, primMs, flushMs, stateMs, decMs, uboMs,
+				(double)g_gx2Perf.draws / accCount);
+			MIPSComp::PpcJitLogRuntimeFallbacks(accCount);
 			accFrame = accFlip = 0.0;
 			accCount = 0;
 			g_gx2Perf = {};

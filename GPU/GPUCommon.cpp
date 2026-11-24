@@ -15,6 +15,9 @@
 #include "GPU/GPU.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/GPUState.h"
+#ifdef __wiiu__
+#include "WiiU/WiiUAsyncGPU.h"
+#endif
 #include "Core/Config.h"
 #include "Core/CoreTiming.h"
 #include "Core/MemMap.h"
@@ -557,6 +560,17 @@ void GPUCommon::DumpNextFrame() {
 u32 GPUCommon::DrawSync(int mode) {
 	if (mode < 0 || mode > 1)
 		return SCE_KERNEL_ERROR_INVALID_MODE;
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		if (mode == 1) {
+			WiiUAsyncGPU::DrainGeEvents();
+			if (WiiUAsyncGPU::IsGfxBusy())
+				return PSP_GE_LIST_DRAWING;
+		} else {
+			WiiUAsyncGPU::WaitGfxIdle();
+		}
+	}
+#endif
 
 	if (mode == 0) {
 		if (!__KernelIsDispatchEnabled()) {
@@ -608,6 +622,17 @@ int GPUCommon::ListSync(int listid, int mode) {
 
 	if (mode < 0 || mode > 1)
 		return SCE_KERNEL_ERROR_INVALID_MODE;
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		if (mode == 1) {
+			WiiUAsyncGPU::DrainGeEvents();
+			if (WiiUAsyncGPU::IsGfxBusy() && dls[listid].state == PSP_GE_DL_STATE_RUNNING)
+				return PSP_GE_LIST_DRAWING;
+		} else {
+			WiiUAsyncGPU::WaitGfxIdle();
+		}
+	}
+#endif
 
 	DisplayList& dl = dls[listid];
 	if (mode == 1) {
@@ -672,6 +697,15 @@ int GPUCommon::GetStack(int index, u32 stackPtr) {
 }
 
 u32 GPUCommon::EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<PspGeListArgs> args, bool head) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		u32 ret = 0;
+		WiiUAsyncGPU::RunOnGfxCore([&]() {
+			ret = EnqueueList(listpc, stall, subIntrBase, args, head);
+		}, WiiUAsyncGPU::SYNC_ENQ);
+		return ret;
+	}
+#endif
 	// TODO Check the stack values in missing arg and ajust the stack depth
 
 	// Check alignment
@@ -786,6 +820,13 @@ u32 GPUCommon::EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<Ps
 }
 
 u32 GPUCommon::DequeueList(int listid) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		u32 ret = 0;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = DequeueList(listid); });
+		return ret;
+	}
+#endif
 	if (listid < 0 || listid >= DisplayListMaxCount || dls[listid].state == PSP_GE_DL_STATE_NONE)
 		return SCE_KERNEL_ERROR_INVALID_ID;
 
@@ -816,6 +857,15 @@ u32 GPUCommon::UpdateStall(int listid, u32 newstall) {
 		return SCE_KERNEL_ERROR_ALREADY;
 
 	dl.stall = newstall & 0x0FFFFFFF;
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		std::atomic_thread_fence(std::memory_order_release);
+		WiiUAsyncGPU::SetLastCpuTicks(CoreTiming::GetTicks());
+		WiiUAsyncGPU::SignalProcessDL();
+		WiiUAsyncGPU::DrainGeEvents();
+		return 0;
+	}
+#endif
 	
 	ProcessDLQueue();
 
@@ -823,6 +873,13 @@ u32 GPUCommon::UpdateStall(int listid, u32 newstall) {
 }
 
 u32 GPUCommon::Continue() {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		u32 ret = 0;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = Continue(); });
+		return ret;
+	}
+#endif
 	if (!currentList)
 		return 0;
 
@@ -863,6 +920,13 @@ u32 GPUCommon::Continue() {
 }
 
 u32 GPUCommon::Break(int mode) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		u32 ret = 0;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = Break(mode); });
+		return ret;
+	}
+#endif
 	if (mode < 0 || mode > 1)
 		return SCE_KERNEL_ERROR_INVALID_MODE;
 
@@ -1021,18 +1085,26 @@ bool GPUCommon::InterpretList(DisplayList &list) {
 void GPUCommon::FastRunLoop(DisplayList &list) {
 	PROFILE_THIS_SCOPE("gpuloop");
 	const CommandInfo *cmdInfo = cmdInfo_;
+	u32 *cmdmem = gstate.cmdmem;
 	int dc = downcount;
+	const u32_le *pcPtr = (const u32_le *)Memory::GetPointerUnchecked(list.pc);
 	for (; dc > 0; --dc) {
-		// We know that display list PCs have the upper nibble == 0 - no need to mask the pointer
-		const u32 op = Memory::ReadUnchecked_U32(list.pc);
+		const u32 op = *pcPtr;
 		const u32 cmd = op >> 24;
 		const CommandInfo &info = cmdInfo[cmd];
-		const u32 diff = op ^ gstate.cmdmem[cmd];
+		const u32 diff = op ^ cmdmem[cmd];
 		if (diff == 0) {
 			if (info.flags & FLAG_EXECUTE) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
+				if (cmd == GE_CMD_VADDR) {
+					gstate_c.vertexAddr = gstate_c.getRelativeAddress(op & 0x00FFFFFF);
+				} else if (cmd == GE_CMD_IADDR) {
+					gstate_c.indexAddr = gstate_c.getRelativeAddress(op & 0x00FFFFFF);
+				} else {
+					downcount = dc;
+					(this->*info.func)(op, diff);
+					dc = downcount;
+					pcPtr = (const u32_le *)Memory::GetPointerUnchecked(list.pc);
+				}
 			}
 		} else {
 			uint64_t flags = info.flags;
@@ -1041,11 +1113,18 @@ void GPUCommon::FastRunLoop(DisplayList &list) {
 					drawEngineCommon_->DispatchFlush();
 				}
 			}
-			gstate.cmdmem[cmd] = op;
+			cmdmem[cmd] = op;
 			if (flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
+				if (cmd == GE_CMD_VADDR) {
+					gstate_c.vertexAddr = gstate_c.getRelativeAddress(op & 0x00FFFFFF);
+				} else if (cmd == GE_CMD_IADDR) {
+					gstate_c.indexAddr = gstate_c.getRelativeAddress(op & 0x00FFFFFF);
+				} else {
+					downcount = dc;
+					(this->*info.func)(op, diff);
+					dc = downcount;
+					pcPtr = (const u32_le *)Memory::GetPointerUnchecked(list.pc);
+				}
 			} else {
 				uint64_t dirty = flags >> 8;
 				if (dirty)
@@ -1053,6 +1132,7 @@ void GPUCommon::FastRunLoop(DisplayList &list) {
 			}
 		}
 		list.pc += 4;
+		pcPtr++;
 	}
 	downcount = 0;
 }
@@ -1173,19 +1253,259 @@ int GPUCommon::GetNextListIndex() {
 }
 
 #ifdef __wiiu__
+#include <atomic>
 #include <wiiu/os/time.h>
+#include <wiiu/os/thread.h>
 #include "GPU/GX2/ShaderManagerGX2.h"
+#include "WiiU/WiiUAsyncGPU.h"
+
+namespace WiiUAsyncGPU {
+
+static OSThread g_cpuThread;
+alignas(16) static uint8_t g_cpuStack[256 * 1024];
+static bool g_cpuThreadStarted = false;
+
+static std::atomic<int> g_cpuReq{ 0 };      // 0=idle, 1=run cpuFn, 2=done
+static std::atomic<bool> g_asyncActive{ false };
+static std::atomic<bool> g_dlRequested{ false };
+static std::atomic<bool> g_dlBusy{ false };
+static std::atomic<int> g_syncReq{ 0 };     // 0=none, 1=run syncFn, 2=done
+static bool g_deferProcessDL = false;
+
+static const std::function<void()> *g_cpuFn = nullptr;
+static const std::function<void()> *g_syncFn = nullptr;
+static std::atomic<u32> g_lastCpuTicksLo{ 0 };
+static std::atomic<u32> g_lastCpuTicksHi{ 0 };
+
+// Lock-free SPSC ring buffer (Core 1 pushes, Core 2 drains)
+static constexpr u32 kGeEventMask = 255;
+static DeferredGeEvent g_geEvents[256];
+static std::atomic<u32> g_geHead{ 0 };
+static std::atomic<u32> g_geTail{ 0 };
+
+// Lock-free SPSC async InvalidateCache queue (Core 2 pushes, Core 1 drains)
+struct AsyncInvEntry { u32 addr; int size; int type; };
+static constexpr u32 kInvMask = 63;
+static AsyncInvEntry g_invQueue[64];
+static std::atomic<u32> g_invHead{ 0 };
+static std::atomic<u32> g_invTail{ 0 };
+
+bool PushAsyncInvalidate(u32 addr, int size, int type) {
+	u32 head = g_invHead.load(std::memory_order_relaxed);
+	u32 tail = g_invTail.load(std::memory_order_acquire);
+	if (head - tail >= 63)
+		return false;
+	g_invQueue[head & kInvMask] = { addr, size, type };
+	g_invHead.store(head + 1, std::memory_order_release);
+	return true;
+}
+
+static void DrainAsyncInvalidates() {
+	u32 tail = g_invTail.load(std::memory_order_relaxed);
+	u32 head = g_invHead.load(std::memory_order_acquire);
+	while (tail != head) {
+		const AsyncInvEntry &e = g_invQueue[tail & kInvMask];
+		g_invTail.store(++tail, std::memory_order_release);
+		if (gpu) {
+			static_cast<GPUCommon *>(gpu)->InvalidateCache(e.addr, e.size, (GPUInvalidationType)e.type);
+		}
+		head = g_invHead.load(std::memory_order_acquire);
+	}
+}
+
+static int CpuThreadEntry(int argc, const char **argv) {
+	int idleSpins = 0;
+	while (true) {
+		if (g_cpuReq.load(std::memory_order_acquire) == 1) {
+			idleSpins = 0;
+			(*g_cpuFn)();
+			g_cpuReq.store(2, std::memory_order_release);
+		} else {
+			if (++idleSpins > 4000) {
+				OSSleepTicks(us_to_ticks(150));
+			}
+		}
+	}
+	return 0;
+}
+
+static void EnsureCpuThread() {
+	if (g_cpuThreadStarted)
+		return;
+	g_cpuThreadStarted = true;
+	if (OSCreateThread(&g_cpuThread, (OSThreadEntryPointFn)CpuThreadEntry, 0, nullptr,
+		g_cpuStack + sizeof(g_cpuStack), sizeof(g_cpuStack), 16, OS_THREAD_ATTRIB_AFFINITY_CPU2)) {
+		OSResumeThread(&g_cpuThread);
+	}
+}
+
+void RunCpuOnCore2(const std::function<void()> &cpuFn) {
+	EnsureCpuThread();
+	SetLastCpuTicks(CoreTiming::GetTicks());
+	g_cpuFn = &cpuFn;
+	g_asyncActive.store(true, std::memory_order_release);
+	g_cpuReq.store(1, std::memory_order_release);
+
+	int idleSpins = 0;
+	while (true) {
+		if (g_dlRequested.exchange(false, std::memory_order_acq_rel)) {
+			idleSpins = 0;
+			DrainAsyncInvalidates();
+			g_dlBusy.store(true, std::memory_order_release);
+			if (gpu) {
+				static_cast<GPUCommon *>(gpu)->ProcessDLQueueInternal();
+			}
+			g_dlBusy.store(false, std::memory_order_release);
+			continue;
+		}
+		if (g_syncReq.load(std::memory_order_acquire) == 1) {
+			idleSpins = 0;
+			DrainAsyncInvalidates();
+			g_deferProcessDL = true;
+			(*g_syncFn)();
+			g_deferProcessDL = false;
+			g_syncReq.store(2, std::memory_order_release);
+			continue;
+		}
+		if (g_cpuReq.load(std::memory_order_acquire) == 2) {
+			DrainAsyncInvalidates();
+			if (g_dlRequested.exchange(false, std::memory_order_acq_rel)) {
+				g_dlBusy.store(true, std::memory_order_release);
+				if (gpu) {
+					static_cast<GPUCommon *>(gpu)->ProcessDLQueueInternal();
+				}
+				g_dlBusy.store(false, std::memory_order_release);
+				continue;
+			}
+			break;
+		}
+		if (++idleSpins > 4000) {
+			OSSleepTicks(us_to_ticks(50));
+		}
+	}
+
+	g_asyncActive.store(false, std::memory_order_release);
+	g_cpuReq.store(0, std::memory_order_relaxed);
+	// Drain any remaining GE events now that Core 2 has finished its slice.
+	DrainGeEvents();
+}
+
+bool IsOnCpuCore() {
+	return g_asyncActive.load(std::memory_order_relaxed) && OSGetCurrentThread() == &g_cpuThread;
+}
+
+bool IsAsyncActive() {
+	return g_asyncActive.load(std::memory_order_relaxed);
+}
+
+void SignalProcessDL() {
+	g_dlRequested.store(true, std::memory_order_release);
+}
+
+bool IsGfxBusy() {
+	return g_dlRequested.load(std::memory_order_acquire) || g_dlBusy.load(std::memory_order_acquire);
+}
+
+void RunOnGfxCore(const std::function<void()> &fn, SyncReason reason) {
+	if (!IsOnCpuCore()) {
+		fn();
+		return;
+	}
+	switch (reason) {
+	case SYNC_ENQ:  g_gx2Perf.syncEnq++; break;
+	case SYNC_WAIT: g_gx2Perf.syncWait++; break;
+	case SYNC_INV:  g_gx2Perf.syncInv++; break;
+	case SYNC_DISP: g_gx2Perf.syncDisp++; break;
+	default:        g_gx2Perf.syncOth++; break;
+	}
+	u64 wt0 = OSGetSystemTime();
+	SetLastCpuTicks(CoreTiming::GetTicks());
+	g_syncFn = &fn;
+	g_syncReq.store(1, std::memory_order_release);
+	int spins = 0;
+	while (g_syncReq.load(std::memory_order_acquire) != 2) {
+		if (++spins > 8000) {
+			OSSleepTicks(us_to_ticks(30));
+		}
+	}
+	g_syncReq.store(0, std::memory_order_relaxed);
+	g_gx2Perf.cpuWaitTicks += OSGetSystemTime() - wt0;
+	DrainGeEvents();
+}
+
+void WaitGfxIdle() {
+	if (!IsOnCpuCore())
+		return;
+	RunOnGfxCore([]() {}, SYNC_WAIT);
+}
+
+void PushGeEvent(DeferredGeEvent::Type type, int arg1, int arg2, u64 ticks) {
+	u32 head = g_geHead.load(std::memory_order_relaxed);
+	g_geEvents[head & kGeEventMask] = { type, arg1, arg2, ticks };
+	g_geHead.store(head + 1, std::memory_order_release);
+}
+
+void DrainGeEvents() {
+	u32 tail = g_geTail.load(std::memory_order_relaxed);
+	u32 head = g_geHead.load(std::memory_order_acquire);
+	while (tail != head) {
+		const DeferredGeEvent &ev = g_geEvents[tail & kGeEventMask];
+		g_geTail.store(++tail, std::memory_order_release);
+		switch (ev.type) {
+		case DeferredGeEvent::INTR:
+			__GeTriggerInterrupt(ev.arg1, (u32)ev.arg2, ev.ticks);
+			break;
+		case DeferredGeEvent::SYNC:
+			__GeTriggerSync((GPUSyncType)ev.arg1, ev.arg2, ev.ticks);
+			break;
+		case DeferredGeEvent::WAIT:
+			__GeTriggerWait((GPUSyncType)ev.arg1, ev.arg2);
+			break;
+		}
+		head = g_geHead.load(std::memory_order_acquire);
+	}
+}
+
+void SetLastCpuTicks(u64 ticks) {
+	g_lastCpuTicksHi.store((u32)(ticks >> 32), std::memory_order_relaxed);
+	g_lastCpuTicksLo.store((u32)ticks, std::memory_order_release);
+}
+
+u64 GetLastCpuTicks() {
+	u32 hi = g_lastCpuTicksHi.load(std::memory_order_acquire);
+	u32 lo = g_lastCpuTicksLo.load(std::memory_order_relaxed);
+	u32 hi2 = g_lastCpuTicksHi.load(std::memory_order_acquire);
+	if (hi != hi2) {
+		lo = g_lastCpuTicksLo.load(std::memory_order_relaxed);
+		hi = hi2;
+	}
+	return ((u64)hi << 32) | (u64)lo;
+}
+
+} // namespace WiiUAsyncGPU
 #endif
 
 void GPUCommon::ProcessDLQueue() {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore() || WiiUAsyncGPU::g_deferProcessDL) {
+		WiiUAsyncGPU::SignalProcessDL();
+		return;
+	}
+#endif
+	ProcessDLQueueInternal();
+}
+
+void GPUCommon::ProcessDLQueueInternal() {
 #ifdef __wiiu__
 	u64 geT0 = OSGetSystemTime();
 	struct GeTimerGuard {
 		u64 t0;
 		~GeTimerGuard() { g_gx2Perf.geTicks += OSGetSystemTime() - t0; }
 	} geGuard{ geT0 };
-#endif
+	startingTicks = WiiUAsyncGPU::IsAsyncActive() ? WiiUAsyncGPU::GetLastCpuTicks() : CoreTiming::GetTicks();
+#else
 	startingTicks = CoreTiming::GetTicks();
+#endif
 	cyclesExecuted = 0;
 
 	// Seems to be correct behaviour to process the list anyway?
@@ -1212,7 +1532,15 @@ void GPUCommon::ProcessDLQueue() {
 
 	drawCompleteTicks = startingTicks + cyclesExecuted;
 	busyTicks = std::max(busyTicks, drawCompleteTicks);
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsAsyncActive()) {
+		WiiUAsyncGPU::PushGeEvent(WiiUAsyncGPU::DeferredGeEvent::SYNC, (int)GPU_SYNC_DRAW, 1, drawCompleteTicks);
+	} else {
+		__GeTriggerSync(GPU_SYNC_DRAW, 1, drawCompleteTicks);
+	}
+#else
 	__GeTriggerSync(GPU_SYNC_DRAW, 1, drawCompleteTicks);
+#endif
 	// Since the event is in CoreTiming, we're in sync.  Just set 0 now.
 }
 
@@ -1447,6 +1775,13 @@ void GPUCommon::Execute_End(u32 op, u32 diff) {
 			}
 			// TODO: Technically, jump/call/ret should generate an interrupt, but before the pc change maybe?
 			if (currentList->interruptsEnabled && trigger) {
+#ifdef __wiiu__
+				if (WiiUAsyncGPU::IsAsyncActive()) {
+					WiiUAsyncGPU::PushGeEvent(WiiUAsyncGPU::DeferredGeEvent::INTR, currentList->id, (int)currentList->pc, startingTicks + cyclesExecuted);
+					currentList->pendingInterrupt = true;
+					UpdateState(GPUSTATE_INTERRUPT);
+				} else
+#endif
 				if (__GeTriggerInterrupt(currentList->id, currentList->pc, startingTicks + cyclesExecuted)) {
 					currentList->pendingInterrupt = true;
 					UpdateState(GPUSTATE_INTERRUPT);
@@ -1459,6 +1794,13 @@ void GPUCommon::Execute_End(u32 op, u32 diff) {
 		case PSP_GE_SIGNAL_HANDLER_PAUSE:
 			currentList->state = PSP_GE_DL_STATE_PAUSED;
 			if (currentList->interruptsEnabled) {
+#ifdef __wiiu__
+				if (WiiUAsyncGPU::IsAsyncActive()) {
+					WiiUAsyncGPU::PushGeEvent(WiiUAsyncGPU::DeferredGeEvent::INTR, currentList->id, (int)currentList->pc, startingTicks + cyclesExecuted);
+					currentList->pendingInterrupt = true;
+					UpdateState(GPUSTATE_INTERRUPT);
+				} else
+#endif
 				if (__GeTriggerInterrupt(currentList->id, currentList->pc, startingTicks + cyclesExecuted)) {
 					currentList->pendingInterrupt = true;
 					UpdateState(GPUSTATE_INTERRUPT);
@@ -1474,13 +1816,27 @@ void GPUCommon::Execute_End(u32 op, u32 diff) {
 		default:
 			currentList->subIntrToken = prev & 0xFFFF;
 			UpdateState(GPUSTATE_DONE);
+#ifdef __wiiu__
+			if (currentList->interruptsEnabled && WiiUAsyncGPU::IsAsyncActive()) {
+				WiiUAsyncGPU::PushGeEvent(WiiUAsyncGPU::DeferredGeEvent::INTR, currentList->id, (int)currentList->pc, startingTicks + cyclesExecuted);
+				currentList->pendingInterrupt = true;
+			} else
+#endif
 			if (currentList->interruptsEnabled && __GeTriggerInterrupt(currentList->id, currentList->pc, startingTicks + cyclesExecuted)) {
 				currentList->pendingInterrupt = true;
 			} else {
 				currentList->state = PSP_GE_DL_STATE_COMPLETED;
 				currentList->waitTicks = startingTicks + cyclesExecuted;
 				busyTicks = std::max(busyTicks, currentList->waitTicks);
+#ifdef __wiiu__
+				if (WiiUAsyncGPU::IsAsyncActive()) {
+					WiiUAsyncGPU::PushGeEvent(WiiUAsyncGPU::DeferredGeEvent::SYNC, (int)GPU_SYNC_LIST, currentList->id, currentList->waitTicks);
+				} else {
+					__GeTriggerSync(GPU_SYNC_LIST, currentList->id, currentList->waitTicks);
+				}
+#else
 				__GeTriggerSync(GPU_SYNC_LIST, currentList->id, currentList->waitTicks);
+#endif
 				if (currentList->started && currentList->context.IsValid()) {
 					gstate.Restore(currentList->context);
 					ReapplyGfxState();
@@ -1561,6 +1917,13 @@ void GPUCommon::Execute_Prim(u32 op, u32 diff) {
 	// when it's time to draw. As most PSP games set state redundantly ALL THE TIME, this is a huge optimization.
 
 	PROFILE_THIS_SCOPE("execprim");
+#ifdef __wiiu__
+	u64 primT0 = OSGetSystemTime();
+	struct PrimTimerGuard {
+		u64 t0;
+		~PrimTimerGuard() { g_gx2Perf.primTicks += OSGetSystemTime() - t0; }
+	} primGuard{ primT0 };
+#endif
 
 	u32 data = op & 0xFFFFFF;
 	u32 count = data & 0xFFFF;
@@ -2483,9 +2846,21 @@ void GPUCommon::DoState(PointerWrap &p) {
 }
 
 void GPUCommon::InterruptStart(int listid) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([&]() { InterruptStart(listid); });
+		return;
+	}
+#endif
 	interruptRunning = true;
 }
 void GPUCommon::InterruptEnd(int listid) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([&]() { InterruptEnd(listid); });
+		return;
+	}
+#endif
 	interruptRunning = false;
 	isbreak = false;
 
@@ -2718,6 +3093,13 @@ void GPUCommon::DoBlockTransfer(u32 skipDrawReason) {
 }
 
 bool GPUCommon::PerformMemoryCopy(u32 dest, u32 src, int size) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		bool ret = false;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = PerformMemoryCopy(dest, src, size); });
+		return ret;
+	}
+#endif
 	// Track stray copies of a framebuffer in RAM. MotoGP does this.
 	if (framebufferManager_->MayIntersectFramebuffer(src) || framebufferManager_->MayIntersectFramebuffer(dest)) {
 		if (!framebufferManager_->NotifyFramebufferCopy(src, dest, size, false, gstate_c.skipDrawReason)) {
@@ -2737,6 +3119,13 @@ bool GPUCommon::PerformMemoryCopy(u32 dest, u32 src, int size) {
 }
 
 bool GPUCommon::PerformMemorySet(u32 dest, u8 v, int size) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		bool ret = false;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = PerformMemorySet(dest, v, size); });
+		return ret;
+	}
+#endif
 	// This may indicate a memset, usually to 0, of a framebuffer.
 	if (framebufferManager_->MayIntersectFramebuffer(dest)) {
 		Memory::Memset(dest, v, size);
@@ -2772,6 +3161,15 @@ bool GPUCommon::PerformMemoryUpload(u32 dest, int size) {
 }
 
 void GPUCommon::InvalidateCache(u32 addr, int size, GPUInvalidationType type) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		if (WiiUAsyncGPU::PushAsyncInvalidate(addr, size, (int)type)) {
+			return;
+		}
+		WiiUAsyncGPU::RunOnGfxCore([&]() { InvalidateCache(addr, size, type); }, WiiUAsyncGPU::SYNC_INV);
+		return;
+	}
+#endif
 	if (size > 0)
 		textureCache_->Invalidate(addr, size, type);
 	else
@@ -2786,6 +3184,12 @@ void GPUCommon::InvalidateCache(u32 addr, int size, GPUInvalidationType type) {
 }
 
 void GPUCommon::NotifyVideoUpload(u32 addr, int size, int width, int format) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([&]() { NotifyVideoUpload(addr, size, width, format); });
+		return;
+	}
+#endif
 	if (Memory::IsVRAMAddress(addr)) {
 		framebufferManager_->NotifyVideoUpload(addr, size, width, (GEBufferFormat)format);
 	}
@@ -2794,6 +3198,13 @@ void GPUCommon::NotifyVideoUpload(u32 addr, int size, int width, int format) {
 }
 
 bool GPUCommon::PerformStencilUpload(u32 dest, int size) {
+#ifdef __wiiu__
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		bool ret = false;
+		WiiUAsyncGPU::RunOnGfxCore([&]() { ret = PerformStencilUpload(dest, size); });
+		return ret;
+	}
+#endif
 	if (framebufferManager_->MayIntersectFramebuffer(dest)) {
 		framebufferManager_->NotifyStencilUpload(dest, size);
 		return true;

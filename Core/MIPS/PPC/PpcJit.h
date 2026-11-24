@@ -333,9 +333,14 @@ namespace MIPSComp
 
 		const u8 *ppcInvSqrt;
 		const u8 *ppcSqrt;
+		const u8 *ppcVSin;
+		const u8 *ppcVCos;
+		const u8 *ppcVAsin;
 		const u8 *compGenericTrampoline;
 #ifdef __wiiu__
-		u8 hotCounts_[65536];
+		static constexpr u32 kHotTableSize = 262144;
+		u32 hotAddr_[kHotTableSize];
+		u8 hotCounts_[kHotTableSize];
 #endif
 	};
 	

@@ -132,9 +132,18 @@ struct GX2PerfCounters {
 	u32 swDraws;
 	u32 psAllDraws;
 	u32 vsFallbackDraws;
+	u32 syncEnq;
+	u32 syncWait;
+	u32 syncInv;
+	u32 syncDisp;
+	u32 syncOth;
 	u64 jitTicks;
+	u64 cpuWaitTicks;
 	u64 geTicks;
 	u64 flushTicks;
+	u64 primTicks;
+	u64 stateTicks;
+	u64 decTicks;
 	u64 uboTicks;
 };
 extern GX2PerfCounters g_gx2Perf;
@@ -213,6 +222,12 @@ private:
 
 	typedef std::map<VShaderID, GX2VShader *> VSCache;
 	VSCache vsCache_;
+
+	struct VSFastSlot { VShaderID id; GX2VShader *shader; };
+	struct FSFastSlot { FShaderID id; GX2PShader *shader; };
+	static constexpr u32 kShaderFastMask = 63;
+	VSFastSlot vsFast_[64]{};
+	FSFastSlot fsFast_[64]{};
 
 	// Uniform block scratchpad. These (the relevant ones) are copied to the current pushbuffer at draw time.
 	UB_VS_FS_Base ub_base;

@@ -100,6 +100,7 @@ public:
 
 	bool InterpretList(DisplayList &list) override;
 	void ProcessDLQueue();
+	void ProcessDLQueueInternal();
 	u32  UpdateStall(int listid, u32 newstall) override;
 	u32  EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<PspGeListArgs> args, bool head) override;
 	u32  DequeueList(int listid) override;

@@ -38,11 +38,14 @@ const u8 *Jit::DoJit(u32 em_address, JitBlock *b)
 	js.PrefixStart();
 
 	// We add a check before the block, used when entering from a linked block.
+	// Callers (WriteExit / LinkBlock) always run WriteDownCount() right before jumping here,
+	// so CR0 already reflects DCNTREG vs 0. Keep >= 16 bytes for UnlinkBlock().
 	b->checkedEntry = (u8*)GetCodePtr();
-	CMPI(DCNTREG, 0);
 	FixupBranch skipOuter = B_Cond(_BGE);
 	MOVI2R(SREG, js.blockStart);
 	B((const void *)outerLoopPCInR0);
+	while (GetCodePtr() - b->checkedEntry < 16)
+		ORI(R0, R0, 0);
 	SetJumpTarget(skipOuter);
 
 	b->normalEntry = GetCodePtr();
@@ -208,20 +211,15 @@ void Jit::GenerateFixedCode() {
 			// & Memory::MEMVIEW32_MASK
 			RLWINM(R3, R3, 0, 2, 31);
 
-			// R3 = memory::base[r3];
-			ADD(R3, BASEREG, R3);
-			MOVI2R(R0, 0);
-			LWBRX(R3, R3, R0);
+			// R3 = memory::base[r3] (byte-swapped);
+			LWBRX(R3, BASEREG, R3);
 
 			// R4 = R3 & MIPS_EMUHACK_VALUE_MASK
 			RLWINM(R4, R3, 0, 8, 31);
 
-			// R3 = R3 & MIPS_EMUHACK_MASK
-			RLWINM(R3, R3, 0, 0, 5);
-			
-			// compare, op == MIPS_EMUHACK_OPCODE 
-			MOVI2R(SREG, MIPS_EMUHACK_OPCODE);
-			CMPL(R3, SREG);
+			// compare top 6 bits == MIPS_EMUHACK_OPCODE >> 26
+			SRWI(R3, R3, 26);
+			CMPLI(R3, MIPS_EMUHACK_OPCODE >> 26);
 
 			// Branch if func block not found 
 			FixupBranch notfound = BNE();
@@ -334,18 +332,57 @@ void Jit::GenerateFixedCode() {
 	FMUL(FPR4, FPR5, FPR4);
 	BLR();
 
+	// Fast leaf helper: FPR1 = vfpu_sin(FPR1) = sin(pi/2 * x), preserves R14..31 and FPR14..31.
+	static float (*const pPpcVfpuSin)(float) = [](float x) -> float {
+		if (!(x > -1e6f && x < 1e6f))
+			return sinf(x * 1.5707963268f);
+		int q = (int)(x >= 0.0f ? (x * 0.25f + 0.5f) : (x * 0.25f - 0.5f));
+		x -= (float)q * 4.0f;
+		if (x > 1.0f) x = 2.0f - x;
+		else if (x < -1.0f) x = -2.0f - x;
+		float x2 = x * x;
+		return x * (1.5707963268f + x2 * (-0.6459640975f + x2 * (0.0796926262f + x2 * (-0.0046817541f + x2 * 0.0001604412f))));
+	};
+	static float (*const pPpcVfpuCos)(float) = [](float x) -> float {
+		return pPpcVfpuSin(x + 1.0f);
+	};
+
+	ppcVSin = AlignCode16();
+	MFLR(R0);
+	STW(R0, R1, 24);
+	QuickCallFunction((void *)pPpcVfpuSin);
+	LWZ(R0, R1, 24);
+	MTLR(R0);
+	BLR();
+
+	ppcVCos = AlignCode16();
+	MFLR(R0);
+	STW(R0, R1, 24);
+	QuickCallFunction((void *)pPpcVfpuCos);
+	LWZ(R0, R1, 24);
+	MTLR(R0);
+	BLR();
+
+	static float (*const pPpcVfpuAsin)(float) = [](float x) -> float {
+		return asinf(x) * 0.63661977236758134308f; // 1 / (pi/2)
+	};
+	ppcVAsin = AlignCode16();
+	MFLR(R0);
+	STW(R0, R1, 24);
+	QuickCallFunction((void *)pPpcVfpuAsin);
+	LWZ(R0, R1, 24);
+	MTLR(R0);
+	BLR();
+
 	// Shared trampoline for Comp_Generic: R3 = op.encoding, R4 = compilerPC, R5 = interpret func.
+	extern void PpcExecGeneric(u32 opEncoding, MIPSInterpretFunc func);
 	compGenericTrampoline = AlignCode16();
 	MFLR(R0);
 	STW(R0, R1, 24);
 	SaveDowncount(DCNTREG);
 	MovToPC(R4);
-#ifdef __wiiu__
-	STW(R3, R1, 20);
-	ADDI(R3, R1, 20);
-#endif
-	MTCTR(R5);
-	BCTRL();
+	MR(R4, R5);
+	QuickCallFunction((void *)&PpcExecGeneric);
 	RestoreDowncount(DCNTREG);
 	LWZ(R0, R1, 24);
 	MTLR(R0);

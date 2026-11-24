@@ -314,7 +314,7 @@ size_t GetMaxExecutableAllocSize() {
 	if (!rwx_heap)
 		return 0;
 	uint32_t maxAlloc = MEMGetAllocatableSizeForExpHeapEx(rwx_heap, 0x100);
-	uint32_t reserve  = rwx_heap_shared ? (128 * 1024) : 0;
+	uint32_t reserve  = rwx_heap_shared ? (32 * 1024) : 0;
 	return maxAlloc > reserve ? (size_t)(maxAlloc - reserve) : 0;
 }
 #endif
@@ -362,7 +362,7 @@ void *AllocateExecutableMemory(size_t size) {
 	void *ptr = nullptr;
 	if (rwx_heap) {
 		uint32_t maxAlloc = MEMGetAllocatableSizeForExpHeapEx(rwx_heap, 0x100);
-		uint32_t reserve  = rwx_heap_shared ? (128 * 1024) : 0;
+		uint32_t reserve  = rwx_heap_shared ? (32 * 1024) : 0;
 		if (maxAlloc > reserve && size <= (size_t)(maxAlloc - reserve)) {
 			ptr = MEMAllocFromExpHeapEx(rwx_heap, (uint32_t)size, rwx_heap_shared ? -0x100 : 0x100);
 			if (ptr && rwx_heap_shared) {

@@ -186,6 +186,8 @@ void ShaderManagerGX2::Clear() {
 	}
 	fsCache_.clear();
 	vsCache_.clear();
+	memset(vsFast_, 0, sizeof(vsFast_));
+	memset(fsFast_, 0, sizeof(fsFast_));
 	lastFSID_.set_invalid();
 	lastVSID_.set_invalid();
 	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE);
@@ -207,8 +209,19 @@ void ShaderManagerGX2::DirtyLastShader() {
 	gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE | DIRTY_ALL_UNIFORMS);
 }
 
-static inline void CopySwapU32(u32 *dst, const u32 *src, size_t count) {
-	for (size_t i = 0; i < count; i++) {
+static inline void CopySwapU32(u32 * __restrict dst, const u32 * __restrict src, size_t count) {
+	size_t i = 0;
+	for (; i + 4 <= count; i += 4) {
+		u32 a = __builtin_bswap32(src[i + 0]);
+		u32 b = __builtin_bswap32(src[i + 1]);
+		u32 c = __builtin_bswap32(src[i + 2]);
+		u32 d = __builtin_bswap32(src[i + 3]);
+		dst[i + 0] = a;
+		dst[i + 1] = b;
+		dst[i + 2] = c;
+		dst[i + 3] = d;
+	}
+	for (; i < count; i++) {
 		dst[i] = __builtin_bswap32(src[i]);
 	}
 }
@@ -217,11 +230,27 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 	uint64_t dirty = gstate_c.GetDirtyUniforms();
 	if (dirty != 0) {
 		u64 uboT0 = OSGetSystemTime();
+		u32 *push_base = nullptr;
+		u32 *push_lights = nullptr;
+		u32 *push_bones = nullptr;
 		if (dirty & DIRTY_BASE_UNIFORMS) {
 			BaseUpdateUniforms(&ub_base, dirty, true, useBufferedRendering);
-			u32 *push_base = (u32 *)push->BeginPush(nullptr, sizeof(ub_base));
+			push_base = (u32 *)push->BeginPush(nullptr, sizeof(ub_base));
 			CopySwapU32(push_base, (const u32 *)&ub_base, sizeof(ub_base) / 4);
-			push->EndPush();
+		}
+		if (dirty & DIRTY_LIGHT_UNIFORMS) {
+			LightUpdateUniforms(&ub_lights, dirty);
+			push_lights = (u32 *)push->BeginPush(nullptr, sizeof(ub_lights));
+			CopySwapU32(push_lights, (const u32 *)&ub_lights, sizeof(ub_lights) / 4);
+		}
+		if (dirty & DIRTY_BONE_UNIFORMS) {
+			BoneUpdateUniforms(&ub_bones, dirty);
+			push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
+			CopySwapU32(push_bones, (const u32 *)&ub_bones, sizeof(ub_bones) / 4);
+		}
+		// Single GX2Invalidate for all updated UBOs in this draw.
+		push->EndPush();
+		if (push_base) {
 			GX2SetVertexUniformBlock(1, sizeof(ub_base), push_base);
 			static const uint64_t DIRTY_FS_BASE =
 				DIRTY_ALPHACOLORREF | DIRTY_FOGCOLOR | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
@@ -231,18 +260,10 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 				psBaseBound_ = true;
 			}
 		}
-		if (dirty & DIRTY_LIGHT_UNIFORMS) {
-			LightUpdateUniforms(&ub_lights, dirty);
-			u32 *push_lights = (u32 *)push->BeginPush(nullptr, sizeof(ub_lights));
-			CopySwapU32(push_lights, (const u32 *)&ub_lights, sizeof(ub_lights) / 4);
-			push->EndPush();
+		if (push_lights) {
 			GX2SetVertexUniformBlock(2, sizeof(ub_lights), push_lights);
 		}
-		if (dirty & DIRTY_BONE_UNIFORMS) {
-			BoneUpdateUniforms(&ub_bones, dirty);
-			u32 *push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
-			CopySwapU32(push_bones, (const u32 *)&ub_bones, sizeof(ub_bones) / 4);
-			push->EndPush();
+		if (push_bones) {
 			GX2SetVertexUniformBlock(3, sizeof(ub_bones), push_bones);
 		}
 		g_gx2Perf.uboTicks += OSGetSystemTime() - uboT0;
@@ -278,30 +299,51 @@ void ShaderManagerGX2::GetShaders(int prim, u32 vertType, GX2VShader **vshader, 
 		return;
 	}
 
-	VSCache::iterator vsIter = vsCache_.find(VSID);
 	GX2VShader *vs;
-	if (vsIter == vsCache_.end()) {
-		// Vertex shader not in cache. Let's generate it.
-		NOTICE_LOG(G3D, "new VS: %s", VertexShaderDesc(VSID).c_str());
-		vs = new GX2VShader(VSID);
-		vsCache_[VSID] = vs;
+	if (lastVShader_ != nullptr && VSID == lastVSID_) {
+		vs = lastVShader_;
 	} else {
-		vs = vsIter->second;
+		u32 vsSlot = ((VSID.d[0] * 2654435761u) ^ VSID.d[1]) & kShaderFastMask;
+		if (vsFast_[vsSlot].shader && vsFast_[vsSlot].id == VSID) {
+			vs = vsFast_[vsSlot].shader;
+		} else {
+			VSCache::iterator vsIter = vsCache_.find(VSID);
+			if (vsIter == vsCache_.end()) {
+				// Vertex shader not in cache. Let's generate it.
+				NOTICE_LOG(G3D, "new VS: %s", VertexShaderDesc(VSID).c_str());
+				vs = new GX2VShader(VSID);
+				vsCache_[VSID] = vs;
+			} else {
+				vs = vsIter->second;
+			}
+			vsFast_[vsSlot].id = VSID;
+			vsFast_[vsSlot].shader = vs;
+		}
+		lastVSID_ = VSID;
 	}
-	lastVSID_ = VSID;
 
-	FSCache::iterator fsIter = fsCache_.find(FSID);
 	GX2PShader *fs;
-	if (fsIter == fsCache_.end()) {
-		// Fragment shader not in cache. Let's generate it.
-		NOTICE_LOG(G3D, "new FS: %s", FragmentShaderDesc(FSID).c_str());
-		fs = new GX2PShader(FSID);
-		fsCache_[FSID] = fs;
+	if (lastFShader_ != nullptr && FSID == lastFSID_) {
+		fs = lastFShader_;
 	} else {
-		fs = fsIter->second;
+		u32 fsSlot = ((FSID.d[0] * 2654435761u) ^ FSID.d[1]) & kShaderFastMask;
+		if (fsFast_[fsSlot].shader && fsFast_[fsSlot].id == FSID) {
+			fs = fsFast_[fsSlot].shader;
+		} else {
+			FSCache::iterator fsIter = fsCache_.find(FSID);
+			if (fsIter == fsCache_.end()) {
+				// Fragment shader not in cache. Let's generate it.
+				NOTICE_LOG(G3D, "new FS: %s", FragmentShaderDesc(FSID).c_str());
+				fs = new GX2PShader(FSID);
+				fsCache_[FSID] = fs;
+			} else {
+				fs = fsIter->second;
+			}
+			fsFast_[fsSlot].id = FSID;
+			fsFast_[fsSlot].shader = fs;
+		}
+		lastFSID_ = FSID;
 	}
-
-	lastFSID_ = FSID;
 
 	lastVShader_ = vs;
 	lastFShader_ = fs;
@@ -309,8 +351,10 @@ void ShaderManagerGX2::GetShaders(int prim, u32 vertType, GX2VShader **vshader, 
 	*vshader = vs;
 	*fshader = fs;
 
-	GX2SetVertexUniformBlock(4, sizeof(UB_VSID), vs->ub_id);
-	GX2SetPixelUniformBlock(5, sizeof(UB_FSID), fs->ub_id);
+	if (vs->IsFallback())
+		GX2SetVertexUniformBlock(4, sizeof(UB_VSID), vs->ub_id);
+	if (fs->IsFallback())
+		GX2SetPixelUniformBlock(5, sizeof(UB_FSID), fs->ub_id);
 }
 
 std::vector<std::string> ShaderManagerGX2::DebugGetShaderIDs(DebugShaderType type) {

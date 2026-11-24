@@ -90,6 +90,8 @@ private:
 	SamplerCacheGX2 samplerCache_;
 
 	GX2Texture *lastBoundTexture;
+	SamplerCacheKey lastBoundSamplerKey_{};
+	bool hasBoundSampler_ = false;
 
 	int decimationCounter_;
 	int texelsScaledThisFrame_;

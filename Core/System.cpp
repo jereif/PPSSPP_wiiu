@@ -69,6 +69,9 @@
 
 #include "GPU/GPUState.h"
 #include "GPU/GPUInterface.h"
+#ifdef __wiiu__
+#include "WiiU/WiiUAsyncGPU.h"
+#endif
 #include "GPU/Debugger/RecordFormat.h"
 
 enum CPUThreadState {
@@ -551,7 +554,13 @@ void PSP_RunLoopUntil(u64 globalticks) {
 		return;
 	}
 
+#ifdef __wiiu__
+	WiiUAsyncGPU::RunCpuOnCore2([&]() {
+		mipsr4k.RunLoopUntil(globalticks);
+	});
+#else
 	mipsr4k.RunLoopUntil(globalticks);
+#endif
 	gpu->CleanupBeforeUI();
 }
 

@@ -36,31 +36,57 @@ namespace MIPSComp
 
 static u32 delaySlotFlagsValue;
 
-// Diagnostics: count how many ops fall back to the interpreter (per opcode name, at compile time).
-static std::map<std::string, int> g_fallbackCounts;
+// Runtime Comp_Generic fallback profiler (fixed table, zero heap allocs in hot path).
+struct RtFallbackSlot {
+	const char *name;
+	u32 count;
+};
+static RtFallbackSlot g_rtFallbacks[128];
+static u64 g_rtFallbackTotal = 0;
+
+void PpcExecGeneric(u32 opEncoding, MIPSInterpretFunc func) {
+	const char *name = MIPSGetName(MIPSOpcode(opEncoding));
+	u32 h = ((uintptr_t)name >> 2) & 127;
+	for (int i = 0; i < 16; ++i) {
+		auto &e = g_rtFallbacks[(h + i) & 127];
+		if (e.name == name || e.name == nullptr) {
+			e.name = name;
+			e.count++;
+			break;
+		}
+	}
+	g_rtFallbackTotal++;
+	func(MIPSOpcode(opEncoding));
+}
+
+void PpcJitLogRuntimeFallbacks(int frames) {
+	if (g_rtFallbackTotal == 0 || frames <= 0)
+		return;
+	std::vector<std::pair<u32, const char *>> sorted;
+	for (int i = 0; i < 128; ++i) {
+		if (g_rtFallbacks[i].count > 0 && g_rtFallbacks[i].name) {
+			sorted.push_back(std::make_pair(g_rtFallbacks[i].count, g_rtFallbacks[i].name));
+			g_rtFallbacks[i].name = nullptr;
+			g_rtFallbacks[i].count = 0;
+		}
+	}
+	u64 total = g_rtFallbackTotal;
+	g_rtFallbackTotal = 0;
+	std::sort(sorted.begin(), sorted.end(), [](const std::pair<u32, const char *> &a, const std::pair<u32, const char *> &b) {
+		return a.first > b.first;
+	});
+	char line[384];
+	int pos = snprintf(line, sizeof(line), "jit fallbacks: %llu/f | ", (unsigned long long)(total / frames));
+	for (size_t i = 0; i < sorted.size() && i < 12 && pos < (int)sizeof(line) - 32; ++i) {
+		pos += snprintf(line + pos, sizeof(line) - pos, "%s=%u ", sorted[i].second, sorted[i].first / frames);
+	}
+	NOTICE_LOG(JIT, "%s", line);
+}
+
 static int g_compiledBlocks = 0;
 static int g_cacheClears = 0;
 static u64 g_compileTicks = 0;
 static u64 g_firstCompileTick = 0;
-
-static void LogJitStats(const char *reason, size_t spaceLeft, size_t regionSize) {
-	NOTICE_LOG(JIT, "JIT stats [%s]: blocks=%d clears=%d used=%d/%d bytes compile=%d ms of %d ms wall",
-		reason, g_compiledBlocks, g_cacheClears, (int)(regionSize - spaceLeft), (int)regionSize,
-		(int)ticks_to_ms(g_compileTicks), g_firstCompileTick ? (int)ticks_to_ms(OSGetSystemTime() - g_firstCompileTick) : 0);
-	std::vector<std::pair<int, std::string>> sorted;
-	for (auto &it : g_fallbackCounts)
-		sorted.push_back(std::make_pair(it.second, it.first));
-	std::sort(sorted.begin(), sorted.end(), [](const std::pair<int, std::string> &a, const std::pair<int, std::string> &b) {
-		return a.first > b.first;
-	});
-	std::string line;
-	for (size_t i = 0; i < sorted.size() && i < 25; i++) {
-		char buf[64];
-		snprintf(buf, sizeof(buf), "%s=%d ", sorted[i].second.c_str(), sorted[i].first);
-		line += buf;
-	}
-	NOTICE_LOG(JIT, "JIT fallbacks: %s", line.c_str());
-}
 
 void Jit::CompileDelaySlot(int flags)
 {
@@ -90,9 +116,13 @@ void Jit::Compile(u32 em_address)
 	PROFILE_THIS_SCOPE("jitc");
 #ifdef __wiiu__
 	// Two-tier JIT for Wii U's 1.78 MB RWX space: interpret cold blocks until they run
-	// kHotThreshold times so one-shot/rare blocks never evict hot gameplay blocks.
-	static const u8 kHotThreshold = 24;
-	u32 hidx = (em_address >> 2) & 0xFFFF;
+	// kHotThreshold times. Tag each slot with em_address so aliasing never compiles cold blocks.
+	static const u8 kHotThreshold = 80;
+	u32 hidx = ((em_address >> 2) * 2654435761u) & (kHotTableSize - 1);
+	if (hotAddr_[hidx] != em_address) {
+		hotAddr_[hidx] = em_address;
+		hotCounts_[hidx] = 0;
+	}
 	if (hotCounts_[hidx] < kHotThreshold && !mips_->inDelaySlot) {
 		hotCounts_[hidx]++;
 		int steps = 0;
@@ -169,8 +199,8 @@ void Jit::UnlinkBlock(u8 *checkedEntry, u32 originalAddress) {
 		ProtectMemoryPages(checkedEntry, 16, MEM_PROT_READ | MEM_PROT_WRITE);
 	}
 	PPCXEmitter emit(checkedEntry);
-	emit.MOVI2R(R3, originalAddress);
-	emit.STW(R0, CTXREG, offsetof(MIPSState, pc));
+	emit.MOVI2R(SREG, originalAddress);
+	emit.STW(SREG, CTXREG, offsetof(MIPSState, pc));
 	emit.B(dispatcher);
 	emit.FlushIcache();
 	if (PlatformIsWXExclusive()) {
@@ -304,7 +334,10 @@ void Jit::ClearCache() {
 	ClearCodeSpace(0);
 	GenerateFixedCode();
 #ifdef __wiiu__
-	memset(hotCounts_, 0, sizeof(hotCounts_));
+	// Decay hotness instead of zeroing so truly hot blocks recompile faster after a clear
+	// while cold/lukewarm blocks stay interpreted.
+	for (size_t i = 0; i < sizeof(hotCounts_); ++i)
+		hotCounts_[i] >>= 1;
 #endif
 }
 
@@ -319,6 +352,7 @@ void Jit::InvalidateCacheAt(u32 em_address, int length) {
 Jit::Jit(MIPSState *mips) : blocks(mips, this), gpr(mips, &jo),fpr(mips),mips_(mips)
 { 
 #ifdef __wiiu__
+	memset(hotAddr_, 0, sizeof(hotAddr_));
 	memset(hotCounts_, 0, sizeof(hotCounts_));
 #endif
 	blocks.Init();

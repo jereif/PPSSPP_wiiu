@@ -48,7 +48,7 @@ bool FragmentShaderGeneratorGX2::Supported(const FShaderID &id) {
 	unsupported.SetBit(FS_BIT_COLOR_TEST);
 	unsupported.SetBits(FS_BIT_COLOR_TEST_FUNC, 2, -1);
 	unsupported.SetBit(FS_BIT_COLOR_AGAINST_ZERO);
-	unsupported.SetBit(FS_BIT_DO_TEXTURE_PROJ);
+	//	unsupported.SetBit(FS_BIT_DO_TEXTURE_PROJ);
 	//	unsupported.SetBits(FS_BIT_STENCIL_TO_ALPHA, 2, -1);
 	//	unsupported.SetBits(FS_BIT_REPLACE_ALPHA_WITH_STENCIL_TYPE, 4, -1);
 	unsupported.SetBits(FS_BIT_REPLACE_LOGIC_OP_TYPE, 2, -1);
@@ -116,6 +116,13 @@ void FragmentShaderGeneratorGX2::Emit(const FShaderID &id, GX2PixelShader *ps) {
 
 	if (!clearMode) {
 		if (doTexture && dbg != 5) {
+			if (id.Bit(FS_BIT_DO_TEXTURE_PROJ)) {
+				RECIP_IEEE(___(x), coords(z));
+				ALU_LAST();
+				MUL(coords(x), coords(x), PS);
+				MUL(coords(y), coords(y), PS);
+				ALU_LAST();
+			}
 			if (id.Bit(FS_BIT_SHADER_TEX_CLAMP)) {
 				// Clamp/wrap inside a larger surface (texclamp = wrap xy, half texel xy).
 				KCacheReg texClamp(UB_Bindings::Base, offsetof(UB_VS_FS_Base, texClamp), this);

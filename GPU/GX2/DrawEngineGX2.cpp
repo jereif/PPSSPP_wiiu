@@ -390,6 +390,8 @@ void DrawEngineGX2::DoFlush() {
 	GEPrimitiveType prim = prevPrim_;
 	u64 flushT0 = OSGetSystemTime();
 	ApplyDrawState(prim);
+	u64 stateT1 = OSGetSystemTime();
+	g_gx2Perf.stateTicks += stateT1 - flushT0;
 
 	// Always use software for flat shading to fix the provoking index.
 	bool tess = gstate_c.bezier || gstate_c.spline;
@@ -565,7 +567,10 @@ void DrawEngineGX2::DoFlush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
 
+		u64 decT1 = OSGetSystemTime();
+		g_gx2Perf.decTicks += decT1 - stateT1;
 		ApplyDrawStateLate(false, dynState_.stencilRef);
+		g_gx2Perf.stateTicks += OSGetSystemTime() - decT1;
 
 		GX2VShader *vshader;
 		GX2PShader *fshader;

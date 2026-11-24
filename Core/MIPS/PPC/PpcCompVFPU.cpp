@@ -614,10 +614,23 @@ namespace MIPSComp
 #endif
 				break;
 			case 18: // d[i] = sinf((float)M_PI_2 * s[i]); break; //vsin
-				DISABLE;
+				if (js.MayHavePrefix()) {
+					DISABLE;
+				}
+				fpr.MapDirtyInV(tempregs[i], sregs[i]);
+				FMR(FPR1, fpr.V(sregs[i]));
+				BL(ppcVSin);
+				FMR(fpr.V(tempregs[i]), FPR1);
 				break;
 			case 19: // d[i] = cosf((float)M_PI_2 * s[i]); break; //vcos
-				DISABLE;
+				if (js.MayHavePrefix()) {
+					DISABLE;
+				}
+				fpr.MapDirtyInV(tempregs[i], sregs[i]);
+				FMR(FPR1, fpr.V(sregs[i]));
+				BL(ppcVCos);
+				FMR(fpr.V(tempregs[i]), FPR1);
+				break;
 				break;
 			case 20: // d[i] = powf(2.0f, s[i]); break; //vexp2
 				DISABLE;
@@ -637,7 +650,13 @@ namespace MIPSComp
 				FABS(fpr.V(tempregs[i]), fpr.V(tempregs[i]));
 				break;
 			case 23: // d[i] = asinf(s[i] * (float)M_2_PI); break; //vasin
-				DISABLE;
+				if (js.MayHavePrefix()) {
+					DISABLE;
+				}
+				fpr.MapDirtyInV(tempregs[i], sregs[i]);
+				FMR(FPR1, fpr.V(sregs[i]));
+				BL(ppcVAsin);
+				FMR(fpr.V(tempregs[i]), FPR1);
 				break;
 			case 24: // d[i] = -1.0f / s[i]; break; // vnrcp
 				fpr.MapDirtyInV(tempregs[i], sregs[i]);
@@ -1297,11 +1316,74 @@ namespace MIPSComp
 	}
 
 	void Jit::Comp_Vcmov(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.HasUnknownPrefix() || disablePrefixes || js.MayHavePrefix())
+			DISABLE;
+
+		int imm3 = (op >> 16) & 7;
+		int tf = (op >> 19) & 1;
+		if (imm3 >= 7)
+			DISABLE;
+
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, sz, _VD);
+
+		MIPSReg tempregs[4];
+		bool needTemp = false;
+		for (int i = 0; i < n; ++i) {
+			if (!IsOverlapSafeAllowS(dregs[i], i, n, sregs)) {
+				tempregs[i] = fpr.GetTempV();
+				needTemp = true;
+			} else {
+				tempregs[i] = sregs[i];
+			}
+		}
+
+		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		if (needTemp) {
+			for (int i = 0; i < n; ++i) {
+				if (tempregs[i] != sregs[i]) {
+					fpr.MapRegV(tempregs[i], MAP_DIRTY | MAP_NOINIT);
+					fpr.SpillLockV(tempregs[i], V_Single);
+					FMR(fpr.V(tempregs[i]), fpr.V(sregs[i]));
+				}
+			}
+		}
+		fpr.MapRegsAndSpillLockV(dregs, sz, MAP_DIRTY);
+
+		LWZ(R3, CTXREG, offsetof(MIPSState, vfpuCtrl[VFPU_CTRL_CC]));
+
+		if (imm3 < 6) {
+			ANDI(SREG, R3, 1 << imm3);
+			FixupBranch skip = B_Cond(tf ? _BNE : _BEQ);
+			for (int i = 0; i < n; ++i) {
+				if (dregs[i] != tempregs[i])
+					FMR(fpr.V(dregs[i]), fpr.V(tempregs[i]));
+			}
+			SetJumpTarget(skip);
+		} else {
+			for (int i = 0; i < n; ++i) {
+				ANDI(SREG, R3, 1 << i);
+				FixupBranch skip = B_Cond(tf ? _BNE : _BEQ);
+				if (dregs[i] != tempregs[i])
+					FMR(fpr.V(dregs[i]), fpr.V(tempregs[i]));
+				SetJumpTarget(skip);
+			}
+		}
+
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Jit::Comp_Viim(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+
+		if (js.HasUnknownPrefix() || disablePrefixes) {
+			DISABLE;
+		}
 
 		u8 dreg;
 		GetVectorRegs(&dreg, V_Single, _VT);
@@ -1381,7 +1463,53 @@ namespace MIPSComp
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 	void Jit::Comp_Vsgn(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.HasUnknownPrefix() || disablePrefixes)
+			DISABLE;
+
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+
+		u8 sregs[4], dregs[4];
+		GetVectorRegsPrefixS(sregs, sz, _VS);
+		GetVectorRegsPrefixD(dregs, sz, _VD);
+
+		MIPSReg tempregs[4];
+		for (int i = 0; i < n; ++i) {
+			if (!IsOverlapSafe(dregs[i], i, n, sregs))
+				tempregs[i] = fpr.GetTempV();
+			else
+				tempregs[i] = dregs[i];
+		}
+
+		MOVI2F(FPR6, 0.0f, false);
+		MOVI2F(FPR7, 1.0f, false);
+		MOVI2F(FPR8, -1.0f, false);
+		for (int i = 0; i < n; ++i) {
+			fpr.MapDirtyInV(tempregs[i], sregs[i]);
+			PPCReg s = fpr.V(sregs[i]);
+			PPCReg d = fpr.V(tempregs[i]);
+			FCMPU(0, s, FPR6);
+			FixupBranch isGt = B_Cond(_BGT);
+			FixupBranch isLt = B_Cond(_BLT);
+			FMR(d, FPR6);
+			FixupBranch done1 = B();
+			SetJumpTarget(isGt);
+			FMR(d, FPR7);
+			FixupBranch done2 = B();
+			SetJumpTarget(isLt);
+			FMR(d, FPR8);
+			SetJumpTarget(done1);
+			SetJumpTarget(done2);
+		}
+		for (int i = 0; i < n; ++i) {
+			if (dregs[i] != tempregs[i]) {
+				fpr.MapDirtyInV(dregs[i], tempregs[i]);
+				FMR(fpr.V(dregs[i]), fpr.V(tempregs[i]));
+			}
+		}
+		ApplyPrefixD(dregs, sz);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 	void Jit::Comp_Vocp(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;

@@ -43,6 +43,7 @@
 #include "GPU/GX2/GPU_GX2.h"
 #include "GPU/GX2/FramebufferManagerGX2.h"
 #include "GPU/GX2/DrawEngineGX2.h"
+#include "WiiU/WiiUAsyncGPU.h"
 #include "GPU/GX2/TextureCacheGX2.h"
 #include "GPU/GX2/GX2Util.h"
 
@@ -199,6 +200,10 @@ void GPU_GX2::EndHostFrame() {
 }
 
 void GPU_GX2::BeginFrame() {
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([this]() { BeginFrame(); });
+		return;
+	}
 	GPUCommon::BeginFrame();
 
 	textureCacheGX2_->StartFrame();
@@ -213,6 +218,10 @@ void GPU_GX2::BeginFrame() {
 }
 
 void GPU_GX2::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([this, framebuf, stride, format]() { SetDisplayFramebuffer(framebuf, stride, format); }, WiiUAsyncGPU::SYNC_DISP);
+		return;
+	}
 	// TODO: Some games like Spongebob - Yellow Avenger, never change framebuffer, they blit to it.
 	// So breaking on frames doesn't work. Might want to move this to sceDisplay vsync.
 	GPUDebug::NotifyDisplay(framebuf, stride, format);
@@ -220,6 +229,10 @@ void GPU_GX2::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat for
 }
 
 void GPU_GX2::CopyDisplayToOutput(bool reallyDirty) {
+	if (WiiUAsyncGPU::IsOnCpuCore()) {
+		WiiUAsyncGPU::RunOnGfxCore([this, reallyDirty]() { CopyDisplayToOutput(reallyDirty); }, WiiUAsyncGPU::SYNC_DISP);
+		return;
+	}
 	GX2SetColorControlReg(&StockGX2::blendDisabledColorWrite);
 	GX2SetTargetChannelMasksReg(&StockGX2::TargetChannelMasks[0xF]);
 
