@@ -253,6 +253,10 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 	uint64_t dirty = gstate_c.GetDirtyUniforms();
 	if (dirty != 0) {
 		u64 uboT0 = OSGetSystemTime();
+		const bool useLights = !lastVShader_ || lastVShader_->ID().Bit(VS_BIT_LIGHTING_ENABLE);
+		const bool useBones = !lastVShader_ || lastVShader_->ID().Bit(VS_BIT_ENABLE_BONES);
+		uint64_t deferred = 0;
+
 		u32 *push_base = nullptr;
 		u32 *push_lights = nullptr;
 		u32 *push_bones = nullptr;
@@ -262,34 +266,55 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 			CopySwapU32(push_base, (const u32 *)&ub_base, sizeof(ub_base) / 4);
 		}
 		if (dirty & DIRTY_LIGHT_UNIFORMS) {
-			LightUpdateUniforms(&ub_lights, dirty);
-			push_lights = (u32 *)push->BeginPush(nullptr, sizeof(ub_lights));
-			CopySwapU32(push_lights, (const u32 *)&ub_lights, sizeof(ub_lights) / 4);
-		}
-		if (dirty & DIRTY_BONE_UNIFORMS) {
-			BoneUpdateUniforms(&ub_bones, dirty);
-			push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
-			CopySwapU32(push_bones, (const u32 *)&ub_bones, sizeof(ub_bones) / 4);
-		}
-		// Single GX2Invalidate for all updated UBOs in this draw.
-		push->EndPush();
-		if (push_base) {
-			GX2SetVertexUniformBlock(1, sizeof(ub_base), push_base);
-			static const uint64_t DIRTY_FS_BASE =
-				DIRTY_ALPHACOLORREF | DIRTY_FOGCOLOR | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
-				DIRTY_ALPHACOLORMASK | DIRTY_SHADERBLEND | DIRTY_TEXCLAMP | DIRTY_DEPAL | DIRTY_DEPTHRANGE;
-			if (!psBaseBound_ || (dirty & DIRTY_FS_BASE)) {
-				GX2SetPixelUniformBlock(1, sizeof(ub_base), push_base);
-				psBaseBound_ = true;
+			if (useLights) {
+				LightUpdateUniforms(&ub_lights, dirty);
+				push_lights = (u32 *)push->BeginPush(nullptr, sizeof(ub_lights));
+				CopySwapU32(push_lights, (const u32 *)&ub_lights, sizeof(ub_lights) / 4);
+			} else {
+				deferred |= (dirty & DIRTY_LIGHT_UNIFORMS);
 			}
 		}
-		if (push_lights) {
-			GX2SetVertexUniformBlock(2, sizeof(ub_lights), push_lights);
+		if (dirty & DIRTY_BONE_UNIFORMS) {
+			if (useBones) {
+				BoneUpdateUniforms(&ub_bones, dirty);
+				push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
+				size_t boneU32s = sizeof(ub_bones) / 4;
+				if (lastVShader_) {
+					size_t usedBones = (size_t)(lastVShader_->ID().Bits(VS_BIT_BONES, 3) + 1);
+					if (usedBones < 8)
+						boneU32s = usedBones * 12;
+				}
+				CopySwapU32(push_bones, (const u32 *)&ub_bones, boneU32s);
+			} else {
+				deferred |= (dirty & DIRTY_BONE_UNIFORMS);
+			}
 		}
-		if (push_bones) {
-			GX2SetVertexUniformBlock(3, sizeof(ub_bones), push_bones);
+		if (push_base || push_lights || push_bones) {
+			// Single DCStoreRange for all updated UBOs in this draw.
+			push->EndPush();
+			if (push_base) {
+				GX2SetVertexUniformBlock(1, sizeof(ub_base), push_base);
+				static const uint64_t DIRTY_FS_BASE =
+					DIRTY_ALPHACOLORREF | DIRTY_FOGCOLOR | DIRTY_TEXENV | DIRTY_STENCILREPLACEVALUE |
+					DIRTY_ALPHACOLORMASK | DIRTY_SHADERBLEND | DIRTY_TEXCLAMP | DIRTY_DEPAL | DIRTY_DEPTHRANGE;
+				if (!psBaseBound_ || (dirty & DIRTY_FS_BASE)) {
+					GX2SetPixelUniformBlock(1, sizeof(ub_base), push_base);
+					psBaseBound_ = true;
+				}
+			}
+			if (push_lights) {
+				GX2SetVertexUniformBlock(2, sizeof(ub_lights), push_lights);
+			}
+			if (push_bones) {
+				GX2SetVertexUniformBlock(3, sizeof(ub_bones), push_bones);
+			}
 		}
 		g_gx2Perf.uboTicks += OSGetSystemTime() - uboT0;
+		gstate_c.CleanUniforms();
+		if (deferred) {
+			gstate_c.Dirty(deferred);
+		}
+		return dirty & ~deferred;
 	}
 	gstate_c.CleanUniforms();
 	return dirty;

@@ -28,6 +28,7 @@
 #include "Common/Profiler/Profiler.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/GX2/DrawEngineGX2.h"
+#include "GPU/GX2/ShaderManagerGX2.h"
 #include "GPU/GX2/StateMappingGX2.h"
 #include "GPU/GX2/FramebufferManagerGX2.h"
 #include "GPU/GX2/TextureCacheGX2.h"
@@ -409,26 +410,51 @@ void DrawEngineGX2::ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef)
 		int height = std::min(dynState_.scissor.bottom - dynState_.scissor.top, (int)current_color_buffer->surface.height - top);
 		draw_->SetScissorRect(left, top, width, height);
 	}
+	if (boundShaderEpoch_ != shaderManager_->GetDirtyEpoch()) {
+		lastBoundRasterState_ = nullptr;
+		lastBoundBlendState_ = nullptr;
+		lastBoundDepthStencilState_ = nullptr;
+		lastBoundBlendColorValid_ = false;
+		lastBoundStencilKey_ = 0xFFFFFFFF;
+	}
+
 	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {
-		GX2SetCullOnlyControl(rasterState_->frontFace_, rasterState_->cullFront_, rasterState_->cullBack_);
+		if (rasterState_ != lastBoundRasterState_) {
+			GX2SetCullOnlyControl(rasterState_->frontFace_, rasterState_->cullFront_, rasterState_->cullBack_);
+			lastBoundRasterState_ = rasterState_;
+		}
 	}
 	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
 		// Need to do this AFTER ApplyTexture because the process of depallettization can ruin the blend state.
-		GX2SetBlendControlReg(&blendState_->blend);
-		GX2SetColorControlReg(&blendState_->color);
-		GX2SetTargetChannelMasksReg(&blendState_->mask);
+		if (blendState_ != lastBoundBlendState_) {
+			GX2SetBlendControlReg(&blendState_->blend);
+			GX2SetColorControlReg(&blendState_->color);
+			GX2SetTargetChannelMasksReg(&blendState_->mask);
+			lastBoundBlendState_ = blendState_;
+		}
 		if (dynState_.useBlendColor) {
-			float blendColor[4];
-			Uint8x4ToFloat4(blendColor, dynState_.blendColor);
-			GX2SetBlendConstantColorReg((GX2BlendConstantColorReg *)blendColor);
+			if (!lastBoundBlendColorValid_ || lastBoundBlendColor_ != dynState_.blendColor) {
+				float blendColor[4];
+				Uint8x4ToFloat4(blendColor, dynState_.blendColor);
+				GX2SetBlendConstantColorReg((GX2BlendConstantColorReg *)blendColor);
+				lastBoundBlendColor_ = dynState_.blendColor;
+				lastBoundBlendColorValid_ = true;
+			}
 		}
 	}
 	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE) || applyStencilRef) {
-		GX2SetDepthStencilControlReg(depthStencilState_);
+		if (depthStencilState_ != lastBoundDepthStencilState_) {
+			GX2SetDepthStencilControlReg(depthStencilState_);
+			lastBoundDepthStencilState_ = depthStencilState_;
+		}
 		if (dynState_.useStencil || applyStencilRef) {
 			if (!applyStencilRef)
 				stencilRef = dynState_.stencilRef;
-			GX2SetStencilMask(keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef, keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef);
+			u32 stencilKey = ((u32)keys_.depthStencil.stencilCompareMask << 16) | ((u32)keys_.depthStencil.stencilWriteMask << 8) | stencilRef;
+			if (stencilKey != lastBoundStencilKey_) {
+				GX2SetStencilMask(keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef, keys_.depthStencil.stencilCompareMask, keys_.depthStencil.stencilWriteMask, stencilRef);
+				lastBoundStencilKey_ = stencilKey;
+			}
 		}
 	}
 	gstate_c.Clean(DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE | DIRTY_BLEND_STATE);

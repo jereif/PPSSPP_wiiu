@@ -388,6 +388,11 @@ void DrawEngineGX2::DoFlush() {
 	if (lastRenderStepId_ != curRenderStepId) {
 		// Dirty everything that has dynamic state that will need re-recording.
 		gstate_c.Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
+		lastBoundRasterState_ = nullptr;
+		lastBoundBlendState_ = nullptr;
+		lastBoundDepthStencilState_ = nullptr;
+		lastBoundBlendColorValid_ = false;
+		lastBoundStencilKey_ = 0xFFFFFFFF;
 		lastRenderStepId_ = curRenderStepId;
 	}
 
@@ -782,15 +787,23 @@ void DrawEngineGX2::DoFlush() {
 
 			// We really do need a vertex layout for each vertex shader (or at least check its ID bits for what inputs it uses)!
 			// Some vertex shaders ignore one of the inputs, and then the layout created from it will lack it, which will be a problem for others.
-			FetchShaderKey key{ vshader, 0xFFFFFFFF }; // Let's use 0xFFFFFFFF to signify TransformedVertex
-			GX2FetchShader *fetchShader = fetchShaderMap_.Get(key);
-			if (!fetchShader) {
-				fetchShader = new GX2FetchShader;
-				fetchShader->size = GX2CalcFetchShaderSize(ARRAY_SIZE(TransformedVertexElements));
-				fetchShader->program = (u8 *)MEM2_alloc(fetchShader->size, GX2_SHADER_ALIGNMENT);
-				GX2InitFetchShader(fetchShader, fetchShader->program, ARRAY_SIZE(TransformedVertexElements), TransformedVertexElements);
-				GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, fetchShader->program, fetchShader->size);
-				fetchShaderMap_.Insert(key, fetchShader);
+			GX2FetchShader *fetchShader;
+			if (vshader == lastFetchVShader_ && lastFetchDecFmtId_ == 0xFFFFFFFF && lastFetchShader_) {
+				fetchShader = lastFetchShader_;
+			} else {
+				FetchShaderKey key{ vshader, 0xFFFFFFFF }; // Let's use 0xFFFFFFFF to signify TransformedVertex
+				fetchShader = fetchShaderMap_.Get(key);
+				if (!fetchShader) {
+					fetchShader = new GX2FetchShader;
+					fetchShader->size = GX2CalcFetchShaderSize(ARRAY_SIZE(TransformedVertexElements));
+					fetchShader->program = (u8 *)MEM2_alloc(fetchShader->size, GX2_SHADER_ALIGNMENT);
+					GX2InitFetchShader(fetchShader, fetchShader->program, ARRAY_SIZE(TransformedVertexElements), TransformedVertexElements);
+					GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, fetchShader->program, fetchShader->size);
+					fetchShaderMap_.Insert(key, fetchShader);
+				}
+				lastFetchVShader_ = vshader;
+				lastFetchDecFmtId_ = 0xFFFFFFFF;
+				lastFetchShader_ = fetchShader;
 			}
 			if (fetchShader != lastBoundFetchShader_) {
 				GX2SetFetchShader(fetchShader);
@@ -842,6 +855,11 @@ void DrawEngineGX2::DoFlush() {
 				NOTICE_LOG(G3D, "GX2SNAP CLEAR #%d flag=%x col=%08x depth=%f sten=%02x", s_snapCount, clearFlag, clearColor, clearDepth, clearStencil);
 			}
 			draw_->Clear(clearFlag, clearColor, clearDepth, clearStencil);
+			lastBoundRasterState_ = nullptr;
+			lastBoundBlendState_ = nullptr;
+			lastBoundDepthStencilState_ = nullptr;
+			lastBoundBlendColorValid_ = false;
+			lastBoundStencilKey_ = 0xFFFFFFFF;
 
 			if ((gstate_c.featureFlags & GPU_USE_CLEAR_RAM_HACK) && gstate.isClearModeColorMask() && (gstate.isClearModeAlphaMask() || gstate.FrameBufFormat() == GE_FORMAT_565)) {
 				int scissorX1 = gstate.getScissorX1();

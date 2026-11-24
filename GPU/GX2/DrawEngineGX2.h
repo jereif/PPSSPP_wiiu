@@ -226,5 +226,11 @@ private:
 	GX2VertexShader *lastFetchVShader_ = nullptr;
 	u32 lastFetchDecFmtId_ = 0xFFFFFFFF;
 	GX2FetchShader *lastFetchShader_ = nullptr;
+	GX2RasterizerState *lastBoundRasterState_ = nullptr;
+	GX2BlendState *lastBoundBlendState_ = nullptr;
+	GX2DepthStencilControlReg *lastBoundDepthStencilState_ = nullptr;
+	u32 lastBoundBlendColor_ = 0;
+	bool lastBoundBlendColorValid_ = false;
+	u32 lastBoundStencilKey_ = 0xFFFFFFFF;
 	u32 boundShaderEpoch_ = 0xFFFFFFFF;
 };
