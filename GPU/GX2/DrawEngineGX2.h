@@ -223,5 +223,8 @@ private:
 	GX2VShader *lastBoundVShader_ = nullptr;
 	GX2PShader *lastBoundFShader_ = nullptr;
 	GX2FetchShader *lastBoundFetchShader_ = nullptr;
+	GX2VertexShader *lastFetchVShader_ = nullptr;
+	u32 lastFetchDecFmtId_ = 0xFFFFFFFF;
+	GX2FetchShader *lastFetchShader_ = nullptr;
 	u32 boundShaderEpoch_ = 0xFFFFFFFF;
 };

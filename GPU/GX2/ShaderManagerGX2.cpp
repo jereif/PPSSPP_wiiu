@@ -210,6 +210,28 @@ void ShaderManagerGX2::DirtyLastShader() {
 }
 
 static inline void CopySwapU32(u32 * __restrict dst, const u32 * __restrict src, size_t count) {
+#if defined(__wiiu__) || defined(__PPC__)
+	const uintptr_t o4 = 4, o8 = 8, o12 = 12;
+	size_t i = 0;
+	for (; i + 4 <= count; i += 4, src += 4, dst += 4) {
+		u32 a = src[0];
+		u32 b = src[1];
+		u32 c = src[2];
+		u32 d = src[3];
+		asm volatile(
+			"stwbrx %0, 0, %4\n\t"
+			"stwbrx %1, %4, %5\n\t"
+			"stwbrx %2, %4, %6\n\t"
+			"stwbrx %3, %4, %7\n\t"
+			:
+			: "r"(a), "r"(b), "r"(c), "r"(d), "b"(dst), "r"(o4), "r"(o8), "r"(o12)
+			: "memory");
+	}
+	for (; i < count; i++, src++, dst++) {
+		u32 a = *src;
+		asm volatile("stwbrx %0, 0, %1" : : "r"(a), "r"(dst) : "memory");
+	}
+#else
 	size_t i = 0;
 	for (; i + 4 <= count; i += 4) {
 		u32 a = __builtin_bswap32(src[i + 0]);
@@ -224,6 +246,7 @@ static inline void CopySwapU32(u32 * __restrict dst, const u32 * __restrict src,
 	for (; i < count; i++) {
 		dst[i] = __builtin_bswap32(src[i]);
 	}
+#endif
 }
 
 uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedRendering) {

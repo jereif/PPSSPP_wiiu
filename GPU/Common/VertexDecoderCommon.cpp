@@ -111,21 +111,47 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
 	u32 idx = vertType & GE_VTYPE_IDX_MASK;
 	if (idx == GE_VTYPE_IDX_8BIT) {
 		const u8 *ind8 = (const u8 *)inds;
-		for (int i = 0; i < count; i++) {
-			u8 value = ind8[i];
-			if (value > upperBound)
-				upperBound = value;
-			if (value < lowerBound)
-				lowerBound = value;
+		int i = 0;
+		for (; i + 4 <= count; i += 4) {
+			int v0 = ind8[i + 0];
+			int v1 = ind8[i + 1];
+			int v2 = ind8[i + 2];
+			int v3 = ind8[i + 3];
+			int lo01 = v0 < v1 ? v0 : v1;
+			int hi01 = v0 > v1 ? v0 : v1;
+			int lo23 = v2 < v3 ? v2 : v3;
+			int hi23 = v2 > v3 ? v2 : v3;
+			int lo = lo01 < lo23 ? lo01 : lo23;
+			int hi = hi01 > hi23 ? hi01 : hi23;
+			if (lo < lowerBound) lowerBound = lo;
+			if (hi > upperBound) upperBound = hi;
+		}
+		for (; i < count; i++) {
+			int value = ind8[i];
+			if (value > upperBound) upperBound = value;
+			if (value < lowerBound) lowerBound = value;
 		}
 	} else if (idx == GE_VTYPE_IDX_16BIT) {
 		const u16_le *ind16 = (const u16_le *)inds;
-		for (int i = 0; i < count; i++) {
-			u16 value = ind16[i];
-			if (value > upperBound)
-				upperBound = value;
-			if (value < lowerBound)
-				lowerBound = value;
+		int i = 0;
+		for (; i + 4 <= count; i += 4) {
+			int v0 = ind16[i + 0];
+			int v1 = ind16[i + 1];
+			int v2 = ind16[i + 2];
+			int v3 = ind16[i + 3];
+			int lo01 = v0 < v1 ? v0 : v1;
+			int hi01 = v0 > v1 ? v0 : v1;
+			int lo23 = v2 < v3 ? v2 : v3;
+			int hi23 = v2 > v3 ? v2 : v3;
+			int lo = lo01 < lo23 ? lo01 : lo23;
+			int hi = hi01 > hi23 ? hi01 : hi23;
+			if (lo < lowerBound) lowerBound = lo;
+			if (hi > upperBound) upperBound = hi;
+		}
+		for (; i < count; i++) {
+			int value = ind16[i];
+			if (value > upperBound) upperBound = value;
+			if (value < lowerBound) lowerBound = value;
 		}
 	} else if (idx == GE_VTYPE_IDX_32BIT) {
 		WARN_LOG_REPORT_ONCE(indexBounds32, G3D, "GetIndexBounds: Decoding 32-bit indexes");

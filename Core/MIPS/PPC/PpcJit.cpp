@@ -117,7 +117,7 @@ void Jit::Compile(u32 em_address)
 #ifdef __wiiu__
 	// Two-tier JIT for Wii U's 1.78 MB RWX space: interpret cold blocks until they run
 	// kHotThreshold times. Tag each slot with em_address so aliasing never compiles cold blocks.
-	static const u8 kHotThreshold = 80;
+	static const u8 kHotThreshold = 180;
 	u32 hidx = ((em_address >> 2) * 2654435761u) & (kHotTableSize - 1);
 	if (hotAddr_[hidx] != em_address) {
 		hotAddr_[hidx] = em_address;

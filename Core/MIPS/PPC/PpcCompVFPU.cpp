@@ -252,10 +252,22 @@ namespace MIPSComp
 					ADD(SREG, SREG, BASEREG);
 				}
 
-				for (int i = 0; i < 4; i++) {				
-					MOVI2R(R9, i * 4);
-					LoadFloatSwap(fpr.V(vregs[i]), SREG, R9);
-				}
+				// Pipeline all 4 byte-reversed loads and stack stores before LFS to avoid 4x store-forwarding stalls.
+				LI(R7, 4);
+				LI(R8, 8);
+				LI(R9, 12);
+				LWBRX(R6, R0, SREG);
+				LWBRX(R7, SREG, R7);
+				LWBRX(R8, SREG, R8);
+				LWBRX(R9, SREG, R9);
+				STW(R6, R1, 16);
+				STW(R7, R1, 20);
+				STW(R8, R1, 24);
+				STW(R9, R1, 28);
+				LFS(fpr.V(vregs[0]), R1, 16);
+				LFS(fpr.V(vregs[1]), R1, 20);
+				LFS(fpr.V(vregs[2]), R1, 24);
+				LFS(fpr.V(vregs[3]), R1, 28);
 			}
 			break;
 
@@ -275,10 +287,22 @@ namespace MIPSComp
 					ADD(SREG, SREG, BASEREG);
 				}
 
-				for (int i = 0; i < 4; i++) {			
-					MOVI2R(R9, i * 4);
-					SaveFloatSwap(fpr.V(vregs[i]), SREG, R9);
-				}
+				// Pipeline all 4 float stores to stack before integer loads and STWBRX to avoid 4x forwarding stalls.
+				SFS(fpr.V(vregs[0]), R1, 16);
+				SFS(fpr.V(vregs[1]), R1, 20);
+				SFS(fpr.V(vregs[2]), R1, 24);
+				SFS(fpr.V(vregs[3]), R1, 28);
+				LWZ(R6, R1, 16);
+				LWZ(R7, R1, 20);
+				LWZ(R8, R1, 24);
+				LWZ(R9, R1, 28);
+				LI(R10, 4);
+				LI(R11, 8);
+				LI(R12, 12);
+				STWBRX(R6, R0, SREG);
+				STWBRX(R7, SREG, R10);
+				STWBRX(R8, SREG, R11);
+				STWBRX(R9, SREG, R12);
 			}
 			break;
 
@@ -869,6 +893,54 @@ namespace MIPSComp
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
+	static void PpcVfpuVmmulHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		MatrixSize sz = GetMtxSize(op);
+		int n = GetMatrixSide(sz);
+		u8 sregs[16], tregs[16], dregs[16];
+		GetMatrixRegs(sregs, sz, _VS);
+		GetMatrixRegs(tregs, sz, _VT);
+		GetMatrixRegs(dregs, sz, _VD);
+		float * __restrict v = mips->v;
+		if (n == 4) {
+			float s[16], t[16];
+			for (int a = 0; a < 4; a++) {
+				for (int b = 0; b < 4; b++) {
+					s[a * 4 + b] = v[voffset[sregs[a * 4 + b]]];
+					t[a * 4 + b] = v[voffset[tregs[a * 4 + b]]];
+				}
+			}
+			for (int a = 0; a < 4; a++) {
+				const float t0 = t[a * 4 + 0];
+				const float t1 = t[a * 4 + 1];
+				const float t2 = t[a * 4 + 2];
+				const float t3 = t[a * 4 + 3];
+				for (int b = 0; b < 4; b++) {
+					v[voffset[dregs[a * 4 + b]]] =
+						s[b * 4 + 0] * t0 + s[b * 4 + 1] * t1 +
+						s[b * 4 + 2] * t2 + s[b * 4 + 3] * t3;
+				}
+			}
+		} else {
+			float s[9], t[9];
+			for (int a = 0; a < 3; a++) {
+				for (int b = 0; b < 3; b++) {
+					s[a * 3 + b] = v[voffset[sregs[a * 4 + b]]];
+					t[a * 3 + b] = v[voffset[tregs[a * 4 + b]]];
+				}
+			}
+			for (int a = 0; a < 3; a++) {
+				const float t0 = t[a * 3 + 0];
+				const float t1 = t[a * 3 + 1];
+				const float t2 = t[a * 3 + 2];
+				for (int b = 0; b < 3; b++) {
+					v[voffset[dregs[a * 4 + b]]] =
+						s[b * 3 + 0] * t0 + s[b * 3 + 1] * t1 + s[b * 3 + 2] * t2;
+				}
+			}
+		}
+	}
+
 	void Jit::Comp_Vmmul(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
 
@@ -884,6 +956,26 @@ namespace MIPSComp
 		GetMatrixRegs(sregs, sz, _VS);
 		GetMatrixRegs(tregs, sz, _VT);
 		GetMatrixRegs(dregs, sz, _VD);
+
+		// For 3x3 and 4x4, call compact compiled helper (handles overlap too, saves ~500B RWX per vmmul.q).
+		if (n >= 3) {
+			for (int a = 0; a < n; a++) {
+				for (int b = 0; b < n; b++) {
+					fpr.FlushV(sregs[a * 4 + b]);
+					fpr.FlushV(tregs[a * 4 + b]);
+				}
+			}
+			for (int a = 0; a < n; a++) {
+				for (int b = 0; b < n; b++) {
+					fpr.DiscardV(dregs[a * 4 + b]);
+				}
+			}
+			MR(R3, CTXREG);
+			MOVI2R(R4, op.encoding);
+			QuickCallFunction((void *)&PpcVfpuVmmulHelper);
+			fpr.ReleaseSpillLocksAndDiscardTemps();
+			return;
+		}
 
 		// Rough overlap check.
 		bool overlap = false;

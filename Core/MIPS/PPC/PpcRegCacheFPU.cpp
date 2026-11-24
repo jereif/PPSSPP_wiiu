@@ -103,16 +103,21 @@ allocate:
 	}
 
 
-	// Still nothing. Let's spill a reg and goto 10.
-	// TODO: Use age or something to choose which register to spill?
-	// TODO: Spill dirty regs first? or opposite?
+	// Prefer spilling a clean (non-dirty) unlocked register first (avoids STFS), using round-robin cursor.
+	static int s_nextFpuSpill = 0;
 	int bestToSpill = -1;
-	for (int i = 0; i < allocCount; i++) {
-		int reg = allocOrder[i] - FPR0;
-		if (ar[reg].mipsReg != -1 && (mr[ar[reg].mipsReg].spillLock || mr[ar[reg].mipsReg].tempLock))
-			continue;
-		bestToSpill = reg;
-		break;
+	for (int pass = 0; pass < 2 && bestToSpill == -1; pass++) {
+		for (int i = 0; i < allocCount; i++) {
+			int idx = (s_nextFpuSpill + i) % allocCount;
+			int reg = allocOrder[idx] - FPR0;
+			if (ar[reg].mipsReg != -1 && (mr[ar[reg].mipsReg].spillLock || mr[ar[reg].mipsReg].tempLock))
+				continue;
+			if (pass == 0 && ar[reg].isDirty)
+				continue;
+			bestToSpill = reg;
+			s_nextFpuSpill = (idx + 1) % allocCount;
+			break;
+		}
 	}
 
 	if (bestToSpill != -1) {

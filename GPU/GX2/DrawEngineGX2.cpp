@@ -120,6 +120,9 @@ void DrawEngineGX2::ClearInputLayoutMap() {
 	});
 	fetchShaderMap_.Clear();
 	lastBoundFetchShader_ = nullptr;
+	lastFetchVShader_ = nullptr;
+	lastFetchDecFmtId_ = 0xFFFFFFFF;
+	lastFetchShader_ = nullptr;
 }
 
 void DrawEngineGX2::Resized() {
@@ -182,11 +185,15 @@ static void VertexAttribSetup(GX2AttribStream *VertexElement, u8 fmt, u8 offset,
 }
 
 GX2FetchShader *DrawEngineGX2::SetupFetchShaderForDraw(GX2VertexShader *vshader, const DecVtxFormat &decFmt, u32 pspFmt) {
-	// TODO: Instead of one for each vshader, we can reduce it to one for each type of shader
-	// that reads TEXCOORD or not, etc. Not sure if worth it.
+	if (vshader == lastFetchVShader_ && decFmt.id == lastFetchDecFmtId_ && lastFetchShader_) {
+		return lastFetchShader_;
+	}
 	FetchShaderKey key{ vshader, decFmt.id };
 	GX2FetchShader *fetchShader = fetchShaderMap_.Get(key);
 	if (fetchShader) {
+		lastFetchVShader_ = vshader;
+		lastFetchDecFmtId_ = decFmt.id;
+		lastFetchShader_ = fetchShader;
 		return fetchShader;
 	}
 
@@ -401,6 +408,24 @@ void DrawEngineGX2::DoFlush() {
 		PROFILE_THIS_SCOPE("T-hard");
 		void *vb_ = nullptr;
 		void *ib_ = nullptr;
+		u8 *pushedVerts = nullptr;
+		int pushedVertSize = 0;
+
+		auto decodeUncached = [&]() {
+			if (decodeCounter_ == 0 && numDrawCalls == 1) {
+				int nv = drawCalls[0].indexUpperBound - drawCalls[0].indexLowerBound + 1;
+				int vSize = nv * (int)dec_->GetDecVtxFmt().stride;
+				if (vSize > 0) {
+					u32 vOffset;
+					pushedVerts = pushVerts_->BeginPush(&vOffset, vSize);
+					pushedVertSize = vSize;
+					DecodeVerts(pushedVerts);
+					pushVerts_->EndPush();
+					return;
+				}
+			}
+			DecodeVerts(decoded);
+		};
 
 		int vertexCount = 0;
 		int maxIndex = 0;
@@ -430,7 +455,7 @@ void DrawEngineGX2::DoFlush() {
 				vai->minihash = ComputeMiniHash();
 				vai->status = VertexArrayInfoGX2::VAI_HASHING;
 				vai->drawsUntilNextFullHash = 0;
-				DecodeVerts(decoded); // writes to indexGen
+				decodeUncached(); // writes to indexGen
 				vai->numVerts = indexGen.VertexCount();
 				vai->prim = indexGen.Prim();
 				vai->maxIndex = indexGen.MaxIndex();
@@ -506,6 +531,9 @@ void DrawEngineGX2::DoFlush() {
 					useElements = vai->ebo ? true : false;
 					gpuStats.numCachedVertsDrawn += vai->numVerts;
 					gstate_c.vertexFullAlpha = vai->flags & VAI11_FLAG_VERTEXFULLALPHA;
+					if (vai->numFrames > 30) {
+						vai->status = VertexArrayInfoGX2::VAI_RELIABLE;
+					}
 				}
 				vb_ = vai->vbo;
 				ib_ = vai->ebo;
@@ -525,6 +553,7 @@ void DrawEngineGX2::DoFlush() {
 				gpuStats.numCachedVertsDrawn += vai->numVerts;
 				vb_ = vai->vbo;
 				ib_ = vai->ebo;
+				useElements = vai->ebo ? true : false;
 
 				vertexCount = vai->numVerts;
 
@@ -540,14 +569,14 @@ void DrawEngineGX2::DoFlush() {
 				if (vai->lastFrame != gpuStats.numFlips) {
 					vai->numFrames++;
 				}
-				DecodeVerts(decoded);
+				decodeUncached();
 				goto rotateVBO;
 			}
 			}
 
 			vai->lastFrame = gpuStats.numFlips;
 		} else {
-			DecodeVerts(decoded);
+			decodeUncached();
 		rotateVBO:
 			gpuStats.numUncachedVertsDrawn += indexGen.VertexCount();
 			useElements = !indexGen.SeenOnlyPurePrims() || prim == GE_PRIM_TRIANGLE_FAN;
@@ -640,12 +669,16 @@ void DrawEngineGX2::DoFlush() {
 		//		GX2prim[prim];
 		if (!vb_) {
 			// Push!
-			u32 vOffset;
-			int vSize = (maxIndex + 1) * dec_->GetDecVtxFmt().stride;
-			u8 *vptr = pushVerts_->BeginPush(&vOffset, vSize);
-			memcpy(vptr, decoded, vSize);
-			pushVerts_->EndPush();
-			GX2SetAttribBuffer(0, vSize, stride, vptr);
+			if (pushedVerts) {
+				GX2SetAttribBuffer(0, pushedVertSize, stride, pushedVerts);
+			} else {
+				u32 vOffset;
+				int vSize = (maxIndex + 1) * dec_->GetDecVtxFmt().stride;
+				u8 *vptr = pushVerts_->BeginPush(&vOffset, vSize);
+				memcpy(vptr, decoded, vSize);
+				pushVerts_->EndPush();
+				GX2SetAttribBuffer(0, vSize, stride, vptr);
+			}
 			if (useElements) {
 				u32 iOffset;
 				int iSize = 2 * indexGen.VertexCount();
