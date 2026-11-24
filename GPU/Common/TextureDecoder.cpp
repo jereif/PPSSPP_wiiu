@@ -183,6 +183,28 @@ static u32 QuickTexHashBasic(const void *checkp, u32 size) {
 		: "r"(size), "r"(checkp)
 		: "r2", "r3", "r4", "r5", "r6"
 	);
+#elif defined(__wiiu__) || defined(__PPC__)
+	u32 c0 = 0, c1 = 0;
+	const u32 size_u32 = size / 4;
+	const u32 *p = (const u32 *)checkp;
+	u32 i = 0;
+	for (; i + 8 <= size_u32; i += 8) {
+		c0 += p[i + 0];
+		c1 += p[i + 4];
+		c0 ^= p[i + 1];
+		c1 ^= p[i + 5];
+		c0 += p[i + 2];
+		c1 += p[i + 6];
+		c0 ^= p[i + 3];
+		c1 ^= p[i + 7];
+	}
+	for (; i + 4 <= size_u32; i += 4) {
+		c0 += p[i + 0];
+		c0 ^= p[i + 1];
+		c0 += p[i + 2];
+		c0 ^= p[i + 3];
+	}
+	u32 check = c0 ^ c1;
 #else
 	u32 check = 0;
 	const u32 size_u32 = size / 4;

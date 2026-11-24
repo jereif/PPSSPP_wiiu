@@ -345,18 +345,59 @@ void IndexGenerator::TranslateList(int numInds, const ITypeLE *inds, int indexOf
 
 template <class ITypeLE, int flag>
 void IndexGenerator::TranslateStrip(int numInds, const ITypeLE *inds, int indexOffset, bool clockwise) {
-	int wind = clockwise ? 1 : 2;
 	indexOffset = index_ - indexOffset;
 	int numTris = numInds - 2;
-	u16 *outInds = inds_;
-	for (int i = 0; i < numTris; i++) {
-		*outInds++ = indexOffset + inds[i];
-		*outInds++ = indexOffset + inds[i + wind];
-		wind ^= 3;  // Toggle between 1 and 2
-		*outInds++ = indexOffset + inds[i + wind];
+	if (numTris > 0) {
+		u16 *outInds = inds_;
+		u16 i0 = (u16)(indexOffset + inds[0]);
+		u16 i1 = (u16)(indexOffset + inds[1]);
+		int i = 0;
+		if (clockwise) {
+			for (; i + 2 <= numTris; i += 2) {
+				u16 i2 = (u16)(indexOffset + inds[i + 2]);
+				u16 i3 = (u16)(indexOffset + inds[i + 3]);
+				outInds[0] = i0;
+				outInds[1] = i1;
+				outInds[2] = i2;
+				outInds[3] = i1;
+				outInds[4] = i3;
+				outInds[5] = i2;
+				outInds += 6;
+				i0 = i2;
+				i1 = i3;
+			}
+			if (i < numTris) {
+				u16 i2 = (u16)(indexOffset + inds[i + 2]);
+				outInds[0] = i0;
+				outInds[1] = i1;
+				outInds[2] = i2;
+				outInds += 3;
+			}
+		} else {
+			for (; i + 2 <= numTris; i += 2) {
+				u16 i2 = (u16)(indexOffset + inds[i + 2]);
+				u16 i3 = (u16)(indexOffset + inds[i + 3]);
+				outInds[0] = i0;
+				outInds[1] = i2;
+				outInds[2] = i1;
+				outInds[3] = i1;
+				outInds[4] = i2;
+				outInds[5] = i3;
+				outInds += 6;
+				i0 = i2;
+				i1 = i3;
+			}
+			if (i < numTris) {
+				u16 i2 = (u16)(indexOffset + inds[i + 2]);
+				outInds[0] = i0;
+				outInds[1] = i2;
+				outInds[2] = i1;
+				outInds += 3;
+			}
+		}
+		inds_ = outInds;
+		count_ += numTris * 3;
 	}
-	inds_ = outInds;
-	count_ += numTris * 3;
 	prim_ = GE_PRIM_TRIANGLES;
 	seenPrims_ |= (1 << GE_PRIM_TRIANGLE_STRIP) | flag;
 }

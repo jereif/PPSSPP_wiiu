@@ -1409,15 +1409,16 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 		// We've compiled the steps into optimized machine code, so just jump!
 		jitted_(ptr_, decoded_, count);
 	} else if (!throughmode && morphcount == 1 && !g_DoubleTextureCoordinates &&
-		(!weighttype || (!g_Config.bSoftwareSkinning && decFmt.w0fmt >= DEC_FLOAT_1 && decFmt.w0fmt <= DEC_FLOAT_4)) &&
-		(!nrm || nrm != 1 || decFmt.nrmfmt == DEC_FLOAT_3)) {
-		// Inline fast-path: eliminates 3-5 pointer-to-member calls per vertex and keeps ptr/dst in registers.
+		(!weighttype || g_Config.bSoftwareSkinning || (decFmt.w0fmt >= DEC_FLOAT_1 && decFmt.w0fmt <= DEC_FLOAT_4)) &&
+		(!nrm || (weighttype && g_Config.bSoftwareSkinning) || nrm != 1 || decFmt.nrmfmt == DEC_FLOAT_3)) {
+		// Inline fast-path (including software skinning): eliminates 3-5 pointer-to-member calls per vertex.
 		const u8 * __restrict p = ptr_;
 		u8 * __restrict d = decoded_;
 		const int inSize = size;
 		const int wt = weighttype;
+		const bool swSkin = wt && g_Config.bSoftwareSkinning;
 		const int nw = nweights;
-		const int numBones = wt ? TranslateNumBones(nw) : 0;
+		const int numBones = (wt && !swSkin) ? TranslateNumBones(nw) : 0;
 		const int tcFmt = tc;
 		const int tcOff = tcoff;
 		const int uvOff = decFmt.uvoff;
@@ -1440,21 +1441,40 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 
 		for (; count > 0; --count) {
 			if (wt) {
-				float *outW = (float *)d;
-				if (wt == 1) {
-					for (int j = 0; j < nw; ++j)
-						outW[j] = p[j] * (1.0f / 128.0f);
-				} else if (wt == 2) {
-					const u16_le *w16 = (const u16_le *)p;
-					for (int j = 0; j < nw; ++j)
-						outW[j] = w16[j] * (1.0f / 32768.0f);
+				if (swSkin) {
+					float weights[8];
+					if (wt == 1) {
+						for (int j = 0; j < nw; ++j)
+							weights[j] = p[j] ? (p[j] * (1.0f / 128.0f)) : 0.0f;
+					} else if (wt == 2) {
+						const u16_le *w16 = (const u16_le *)p;
+						for (int j = 0; j < nw; ++j) {
+							u16 w = w16[j];
+							weights[j] = w ? (w * (1.0f / 32768.0f)) : 0.0f;
+						}
+					} else {
+						const float_le *wf = (const float_le *)p;
+						for (int j = 0; j < nw; ++j)
+							weights[j] = wf[j];
+					}
+					ComputeSkinMatrix(weights);
 				} else {
-					const float_le *wf = (const float_le *)p;
-					for (int j = 0; j < nw; ++j)
-						outW[j] = wf[j];
+					float *outW = (float *)d;
+					if (wt == 1) {
+						for (int j = 0; j < nw; ++j)
+							outW[j] = p[j] * (1.0f / 128.0f);
+					} else if (wt == 2) {
+						const u16_le *w16 = (const u16_le *)p;
+						for (int j = 0; j < nw; ++j)
+							outW[j] = w16[j] * (1.0f / 32768.0f);
+					} else {
+						const float_le *wf = (const float_le *)p;
+						for (int j = 0; j < nw; ++j)
+							outW[j] = wf[j];
+					}
+					for (int j = nw; j < numBones; ++j)
+						outW[j] = 0.0f;
 				}
-				for (int j = nw; j < numBones; ++j)
-					outW[j] = 0.0f;
 			}
 			if (tcFmt) {
 				float *uv = (float *)(d + uvOff);
@@ -1504,7 +1524,27 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 				}
 			}
 			if (nrmFmt) {
-				if (nrmFmt == 1) {
+				if (swSkin) {
+					float *no = (float *)(d + dnOff);
+					float fn[3];
+					if (nrmFmt == 1) {
+						const s8 *sv = (const s8 *)(p + nOff);
+						fn[0] = sv[0] * (1.0f / 128.0f);
+						fn[1] = sv[1] * (1.0f / 128.0f);
+						fn[2] = sv[2] * (1.0f / 128.0f);
+					} else if (nrmFmt == 2) {
+						const s16_le *sv = (const s16_le *)(p + nOff);
+						fn[0] = (float)sv[0] * (1.0f / 32768.0f);
+						fn[1] = (float)sv[1] * (1.0f / 32768.0f);
+						fn[2] = (float)sv[2] * (1.0f / 32768.0f);
+					} else {
+						const float_le *fv = (const float_le *)(p + nOff);
+						fn[0] = fv[0];
+						fn[1] = fv[1];
+						fn[2] = fv[2];
+					}
+					Norm3ByMatrix43(no, fn, skinMatrix);
+				} else if (nrmFmt == 1) {
 					float *no = (float *)(d + dnOff);
 					const s8 *sv = (const s8 *)(p + nOff);
 					no[0] = sv[0] * (1.0f / 128.0f);
@@ -1525,7 +1565,27 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 					no[2] = fv[2];
 				}
 			}
-			if (posFmt == 2) {
+			if (swSkin) {
+				float *po = (float *)(d + dpOff);
+				float fn[3];
+				if (posFmt == 2) {
+					const s16_le *pv = (const s16_le *)(p + pOff);
+					fn[0] = (float)pv[0] * (1.0f / 32768.0f);
+					fn[1] = (float)pv[1] * (1.0f / 32768.0f);
+					fn[2] = (float)pv[2] * (1.0f / 32768.0f);
+				} else if (posFmt == 3) {
+					const float_le *pv = (const float_le *)(p + pOff);
+					fn[0] = pv[0];
+					fn[1] = pv[1];
+					fn[2] = pv[2];
+				} else {
+					const s8 *pv = (const s8 *)(p + pOff);
+					fn[0] = pv[0] * (1.0f / 128.0f);
+					fn[1] = pv[1] * (1.0f / 128.0f);
+					fn[2] = pv[2] * (1.0f / 128.0f);
+				}
+				Vec3ByMatrix43(po, fn, skinMatrix);
+			} else if (posFmt == 2) {
 				float *po = (float *)(d + dpOff);
 				const s16_le *pv = (const s16_le *)(p + pOff);
 				po[0] = pv[0] * (1.0f / 32768.0f);

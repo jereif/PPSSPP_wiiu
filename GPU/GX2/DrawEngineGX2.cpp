@@ -417,9 +417,12 @@ void DrawEngineGX2::DoFlush() {
 		int pushedVertSize = 0;
 
 		auto decodeUncached = [&]() {
-			if (decodeCounter_ == 0 && numDrawCalls == 1) {
-				int nv = drawCalls[0].indexUpperBound - drawCalls[0].indexLowerBound + 1;
-				int vSize = nv * (int)dec_->GetDecVtxFmt().stride;
+			if (decodeCounter_ == 0 && numDrawCalls >= 1) {
+				int totalVerts = 0;
+				for (int i = 0; i < numDrawCalls; i++) {
+					totalVerts += drawCalls[i].indexUpperBound - drawCalls[i].indexLowerBound + 1;
+				}
+				int vSize = totalVerts * (int)dec_->GetDecVtxFmt().stride;
 				if (vSize > 0) {
 					u32 vOffset;
 					pushedVerts = pushVerts_->BeginPush(&vOffset, vSize);
