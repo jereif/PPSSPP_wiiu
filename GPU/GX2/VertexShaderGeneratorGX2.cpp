@@ -493,10 +493,17 @@ void VertexShaderGeneratorGX2::Emit(const VShaderID &id, GX2VertexShader *vs) {
 			Reg lightSum1 = (!specularIsZero) ? allocReg() : Reg(0);
 
 			// lightSum0 = u_ambient * ambientMat + vec4(matemissive, 0.0)
-			MULADD(lightSum0(x), uAmbient(x), matAmbReg(x), matEmissive(x));
-			MULADD(lightSum0(y), uAmbient(y), matAmbReg(y), matEmissive(y));
-			MULADD(lightSum0(z), uAmbient(z), matAmbReg(z), matEmissive(z));
+			// Split into two ALU groups so each group reads only 1 KCache vector (<=4 scalar reads);
+			// reading both uAmbient and matEmissive in one ALU_LAST() overflows R700 constant read ports
+			// and corrupts lightSum0.z (causing the blue/violet world tint).
+			MUL(___(x), uAmbient(x), matAmbReg(x));
+			MUL(___(y), uAmbient(y), matAmbReg(y));
+			MUL(___(z), uAmbient(z), matAmbReg(z));
 			MUL(lightSum0(w), uAmbient(w), matAmbReg(w));
+			ALU_LAST();
+			ADD(lightSum0(x), PV(x), matEmissive(x));
+			ADD(lightSum0(y), PV(y), matEmissive(y));
+			ADD(lightSum0(z), PV(z), matEmissive(z));
 			ALU_LAST();
 
 			if (!specularIsZero) {

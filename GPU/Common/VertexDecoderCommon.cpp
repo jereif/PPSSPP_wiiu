@@ -1306,6 +1306,146 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 	if (jitted_) {
 		// We've compiled the steps into optimized machine code, so just jump!
 		jitted_(ptr_, decoded_, count);
+	} else if (!throughmode && morphcount == 1 && !g_DoubleTextureCoordinates &&
+		(!weighttype || (!g_Config.bSoftwareSkinning && decFmt.w0fmt >= DEC_FLOAT_1 && decFmt.w0fmt <= DEC_FLOAT_4)) &&
+		(!nrm || nrm != 1 || decFmt.nrmfmt == DEC_FLOAT_3)) {
+		// Inline fast-path: eliminates 3-5 pointer-to-member calls per vertex and keeps ptr/dst in registers.
+		const u8 * __restrict p = ptr_;
+		u8 * __restrict d = decoded_;
+		const int inSize = size;
+		const int wt = weighttype;
+		const int nw = nweights;
+		const int numBones = wt ? TranslateNumBones(nw) : 0;
+		const int tcFmt = tc;
+		const int tcOff = tcoff;
+		const int uvOff = decFmt.uvoff;
+		const bool prescale = tcFmt && (gstate.getUVGenMode() == GE_TEXMAP_TEXTURE_COORDS || gstate.getUVGenMode() == GE_TEXMAP_UNKNOWN);
+		const float tcBase = (tcFmt == 1) ? (1.0f / 128.0f) : (tcFmt == 2 ? (1.0f / 32768.0f) : 1.0f);
+		const float uMul = prescale ? (tcBase * gstate_c.uv.uScale) : tcBase;
+		const float vMul = prescale ? (tcBase * gstate_c.uv.vScale) : tcBase;
+		const float uAdd = prescale ? gstate_c.uv.uOff : 0.0f;
+		const float vAdd = prescale ? gstate_c.uv.vOff : 0.0f;
+		const int colFmt = col;
+		const int cOff = coloff;
+		const int dc0Off = decFmt.c0off;
+		const int nrmFmt = nrm;
+		const int nOff = nrmoff;
+		const int dnOff = decFmt.nrmoff;
+		const int posFmt = pos;
+		const int pOff = posoff;
+		const int dpOff = decFmt.posoff;
+		bool fullAlpha = gstate_c.vertexFullAlpha;
+
+		for (; count > 0; --count) {
+			if (wt) {
+				float *outW = (float *)d;
+				if (wt == 1) {
+					for (int j = 0; j < nw; ++j)
+						outW[j] = p[j] * (1.0f / 128.0f);
+				} else if (wt == 2) {
+					const u16_le *w16 = (const u16_le *)p;
+					for (int j = 0; j < nw; ++j)
+						outW[j] = w16[j] * (1.0f / 32768.0f);
+				} else {
+					const float_le *wf = (const float_le *)p;
+					for (int j = 0; j < nw; ++j)
+						outW[j] = wf[j];
+				}
+				for (int j = nw; j < numBones; ++j)
+					outW[j] = 0.0f;
+			}
+			if (tcFmt) {
+				float *uv = (float *)(d + uvOff);
+				if (tcFmt == 2) {
+					const u16_le *uv16 = (const u16_le *)(p + tcOff);
+					uv[0] = (float)uv16[0] * uMul + uAdd;
+					uv[1] = (float)uv16[1] * vMul + vAdd;
+				} else if (tcFmt == 1) {
+					const u8 *uv8 = p + tcOff;
+					uv[0] = (float)uv8[0] * uMul + uAdd;
+					uv[1] = (float)uv8[1] * vMul + vAdd;
+				} else {
+					const float_le *uvf = (const float_le *)(p + tcOff);
+					uv[0] = uvf[0] * uMul + uAdd;
+					uv[1] = uvf[1] * vMul + vAdd;
+				}
+			}
+			if (colFmt) {
+				u32_le *cOut = (u32_le *)(d + dc0Off);
+				if (colFmt == 7) {
+					u32 cdata = *(const u32_le *)(p + cOff);
+					fullAlpha &= ((cdata >> 24) == 0xFF);
+					*cOut = cdata;
+				} else if (colFmt == 6) {
+					u16 cdata = *(const u16_le *)(p + cOff);
+					fullAlpha &= ((cdata >> 12) == 0xF);
+					u32 c = Convert4To8(cdata & 0xF) |
+						(Convert4To8((cdata >> 4) & 0xF) << 8) |
+						(Convert4To8((cdata >> 8) & 0xF) << 16) |
+						(Convert4To8((cdata >> 12) & 0xF) << 24);
+					*cOut = c;
+				} else if (colFmt == 5) {
+					u16 cdata = *(const u16_le *)(p + cOff);
+					fullAlpha &= ((cdata >> 15) != 0);
+					u32 c = Convert5To8(cdata & 0x1f) |
+						(Convert5To8((cdata >> 5) & 0x1f) << 8) |
+						(Convert5To8((cdata >> 10) & 0x1f) << 16) |
+						((cdata >> 15) ? (255u << 24) : 0);
+					*cOut = c;
+				} else {
+					u16 cdata = *(const u16_le *)(p + cOff);
+					u32 c = Convert5To8(cdata & 0x1f) |
+						(Convert6To8((cdata >> 5) & 0x3f) << 8) |
+						(Convert5To8((cdata >> 11) & 0x1f) << 16) |
+						(255u << 24);
+					*cOut = c;
+				}
+			}
+			if (nrmFmt) {
+				if (nrmFmt == 1) {
+					float *no = (float *)(d + dnOff);
+					const s8 *sv = (const s8 *)(p + nOff);
+					no[0] = sv[0] * (1.0f / 128.0f);
+					no[1] = sv[1] * (1.0f / 128.0f);
+					no[2] = sv[2] * (1.0f / 128.0f);
+				} else if (nrmFmt == 2) {
+					s16 *no = (s16 *)(d + dnOff);
+					const s16_le *sv = (const s16_le *)(p + nOff);
+					no[0] = sv[0];
+					no[1] = sv[1];
+					no[2] = sv[2];
+					no[3] = 0;
+				} else {
+					u32 *no = (u32 *)(d + dnOff);
+					const u32_le *fv = (const u32_le *)(p + nOff);
+					no[0] = fv[0];
+					no[1] = fv[1];
+					no[2] = fv[2];
+				}
+			}
+			if (posFmt == 2) {
+				float *po = (float *)(d + dpOff);
+				const s16_le *pv = (const s16_le *)(p + pOff);
+				po[0] = pv[0] * (1.0f / 32768.0f);
+				po[1] = pv[1] * (1.0f / 32768.0f);
+				po[2] = pv[2] * (1.0f / 32768.0f);
+			} else if (posFmt == 3) {
+				u32 *po = (u32 *)(d + dpOff);
+				const u32_le *pv = (const u32_le *)(p + pOff);
+				po[0] = pv[0];
+				po[1] = pv[1];
+				po[2] = pv[2];
+			} else {
+				float *po = (float *)(d + dpOff);
+				const s8 *pv = (const s8 *)(p + pOff);
+				po[0] = pv[0] * (1.0f / 128.0f);
+				po[1] = pv[1] * (1.0f / 128.0f);
+				po[2] = pv[2] * (1.0f / 128.0f);
+			}
+			p += inSize;
+			d += stride;
+		}
+		gstate_c.vertexFullAlpha = fullAlpha;
 	} else {
 		// Interpret the decode steps
 		for (; count; count--) {

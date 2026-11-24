@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include <cstdint>
 #include <wiiu/gx2.h>
+#include <wiiu/os/cache.h>
 #include <wiiu/os/memory.h>
 #include <Common/Log.h>
 
@@ -44,6 +45,8 @@ public:
 		EndPush();
 		if (pos_ > size_ / 2) {
 			pos_ = 0;
+			// Invalidate GPU cache once on wrap so reused ring regions don't hit stale GPU L2 lines.
+			GX2Invalidate(mode_, buffer_, size_);
 		}
 	}
 
@@ -54,6 +57,7 @@ public:
 			// Wrap! Note that with this method, since we return the same buffer as before, you have to do the draw immediately after.
 			EndPush();
 			pos_ = 0;
+			GX2Invalidate(mode_, buffer_, size_);
 		}
 		if(offset)
 			*offset = pos_;
@@ -62,7 +66,9 @@ public:
 	}
 	void EndPush() {
 		if(push_size_) {
-			GX2Invalidate(mode_, buffer_ + pos_, push_size_);
+			// Push buffer advances monotonically until wrap, so GPU has no stale cache lines for this range.
+			// DCStoreRange flushes CPU D-cache to MEM2 without emitting a per-draw GPU SURFACE_SYNC packet.
+			DCStoreRange(buffer_ + pos_, push_size_);
 			pos_ += push_size_;
 			push_size_ = 0;
 		}

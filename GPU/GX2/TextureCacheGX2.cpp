@@ -632,7 +632,8 @@ void TextureCacheGX2::LoadTextureLevel(TexCacheEntry &entry, ReplacedTexture &re
 			pixelData = (u32 *)mapData;
 			decPitch = mapRowPitch;
 		}
-		DecodeTextureLevel((u8 *)pixelData, decPitch, tfmt, clutformat, texaddr, level, bufw, false, false, false);
+		bool expandTo32bit = (dstFmt == GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8);
+		DecodeTextureLevel((u8 *)pixelData, decPitch, tfmt, clutformat, texaddr, level, bufw, false, false, expandTo32bit);
 
 		// We check before scaling since scaling shouldn't invent alpha from a full alpha texture.
 		if ((entry.status & TexCacheEntry::STATUS_CHANGE_FREQUENT) == 0) {
