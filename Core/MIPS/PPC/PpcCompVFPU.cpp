@@ -600,25 +600,20 @@ namespace MIPSComp
 				FNEG(fpr.V(tempregs[i]), fpr.V(sregs[i]));
 				break;
 
-			/*  These are probably just as broken as the prefix.
-			case 4: // if (s[i] < 0) d[i] = 0; else {if(s[i] > 1.0f) d[i] = 1.0f; else d[i] = s[i];} break;    // vsat0
+			case 4: // vsat0: clamp [0.0f, 1.0f]
 				fpr.MapDirtyInV(tempregs[i], sregs[i]);
-				MOVI2F(S0, 0.5f, R0);
-				VABS(S1, fpr.V(sregs[i]));                          // S1 = fabs(x)
-				VSUB(fpr.V(tempregs[i]), fpr.V(sregs[i]), S0);     // S2 = fabs(x-0.5f) {VABD}
-				VABS(fpr.V(tempregs[i]), fpr.V(tempregs[i]));
-				VSUB(fpr.V(tempregs[i]), S1, fpr.V(tempregs[i])); // v[i] = S1 - S2 + 0.5f
-				VADD(fpr.V(tempregs[i]), fpr.V(tempregs[i]), S0);
+				MOVI2F(FPR6, 0.0f, false);
+				MOVI2F(FPR7, 1.0f, false);
+				FMAX(fpr.V(tempregs[i]), fpr.V(sregs[i]), FPR6);
+				FMIN(fpr.V(tempregs[i]), fpr.V(tempregs[i]), FPR7);
 				break;
-			case 5: // if (s[i] < -1.0f) d[i] = -1.0f; else {if(s[i] > 1.0f) d[i] = 1.0f; else d[i] = s[i];} break;  // vsat1
+			case 5: // vsat1: clamp [-1.0f, 1.0f]
 				fpr.MapDirtyInV(tempregs[i], sregs[i]);
-				MOVI2F(S0, 1.0f, R0);
-				VABS(S1, fpr.V(sregs[i]));                          // S1 = fabs(x)
-				VSUB(fpr.V(tempregs[i]), fpr.V(sregs[i]), S0);     // S2 = fabs(x-1.0f) {VABD}
-				VABS(fpr.V(tempregs[i]), fpr.V(tempregs[i]));
-				VSUB(fpr.V(tempregs[i]), S1, fpr.V(tempregs[i])); // v[i] = S1 - S2
+				MOVI2F(FPR6, -1.0f, false);
+				MOVI2F(FPR7, 1.0f, false);
+				FMAX(fpr.V(tempregs[i]), fpr.V(sregs[i]), FPR6);
+				FMIN(fpr.V(tempregs[i]), fpr.V(tempregs[i]), FPR7);
 				break;
-				*/
 
 			case 16: // d[i] = 1.0f / s[i]; break; //vrcp
 				fpr.MapDirtyInV(tempregs[i], sregs[i]);
@@ -1130,8 +1125,56 @@ namespace MIPSComp
 		}
 	}
 
+	static void PpcVfpuVmsclHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		MatrixSize sz = GetMtxSize(op);
+		int n = GetMatrixSide(sz);
+		u8 sregs[16], dregs[16], treg;
+		GetMatrixRegs(sregs, sz, _VS);
+		GetVectorRegs(&treg, V_Single, _VT);
+		GetMatrixRegs(dregs, sz, _VD);
+		float * __restrict v = mips->v;
+		const float scale = v[voffset[treg]];
+		float tmp[16];
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				tmp[a * 4 + b] = v[voffset[sregs[a * 4 + b]]] * scale;
+			}
+		}
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				v[voffset[dregs[a * 4 + b]]] = tmp[a * 4 + b];
+			}
+		}
+	}
+
 	void Jit::Comp_Vmscl(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		MatrixSize sz = GetMtxSize(op);
+		int n = GetMatrixSide(sz);
+		u8 sregs[16], dregs[16], treg;
+		GetMatrixRegs(sregs, sz, _VS);
+		GetVectorRegs(&treg, V_Single, _VT);
+		GetMatrixRegs(dregs, sz, _VD);
+
+		fpr.FlushV(treg);
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				fpr.FlushV(sregs[a * 4 + b]);
+			}
+		}
+		for (int a = 0; a < n; a++) {
+			for (int b = 0; b < n; b++) {
+				fpr.DiscardV(dregs[a * 4 + b]);
+			}
+		}
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVmsclHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	static void PpcVfpuVtfmHelper(MIPSState *mips, u32 opEncoding) {
@@ -1348,12 +1391,168 @@ namespace MIPSComp
 		DISABLE;
 	}
 
+	static void PpcVfpuVi2xHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], dregs[2];
+		GetVectorRegs(sregs, sz, _VS);
+		int s[4] = {};
+		for (int i = 0; i < n; i++) {
+			memcpy(&s[i], &mips->v[voffset[sregs[i]]], 4);
+		}
+		u32 d[2] = {};
+		VectorSize oz = V_Single;
+		switch ((op >> 16) & 3) {
+		case 0: // vi2uc
+			for (int i = 0; i < 4; i++) {
+				int val = s[i];
+				if (val < 0) val = 0;
+				val >>= 23;
+				d[0] |= ((u32)val & 0xFF) << (i * 8);
+			}
+			oz = V_Single;
+			break;
+		case 1: // vi2c
+			for (int i = 0; i < 4; i++) {
+				u32 val = (u32)s[i];
+				d[0] |= (val >> 24) << (i * 8);
+			}
+			oz = V_Single;
+			break;
+		case 2: // vi2us
+			for (int i = 0; i < (n + 1) / 2; i++) {
+				int lo = s[i * 2];
+				int hi = s[i * 2 + 1];
+				if (lo < 0) lo = 0;
+				if (hi < 0) hi = 0;
+				d[i] = ((u32)(lo >> 15) & 0xFFFF) | (((u32)(hi >> 15) & 0xFFFF) << 16);
+			}
+			oz = (sz == V_Quad || sz == V_Triple) ? V_Pair : V_Single;
+			break;
+		case 3: // vi2s
+			for (int i = 0; i < (n + 1) / 2; i++) {
+				u32 lo = (u32)s[i * 2] >> 16;
+				u32 hi = (u32)s[i * 2 + 1] >> 16;
+				d[i] = lo | (hi << 16);
+			}
+			oz = (sz == V_Quad || sz == V_Triple) ? V_Pair : V_Single;
+			break;
+		}
+		GetVectorRegs(dregs, oz, _VD);
+		int on = GetNumVectorElements(oz);
+		for (int i = 0; i < on; i++) {
+			memcpy(&mips->v[voffset[dregs[i]]], &d[i], 4);
+		}
+	}
+
 	void Jit::Comp_Vi2x(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		int op2 = (op >> 16) & 3;
+		VectorSize oz = (op2 >= 2 && (sz == V_Quad || sz == V_Triple)) ? V_Pair : V_Single;
+		int on = GetNumVectorElements(oz);
+		u8 sregs[4], dregs[2];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, oz, _VD);
+		for (int i = 0; i < n; i++)
+			fpr.FlushV(sregs[i]);
+		for (int i = 0; i < on; i++)
+			fpr.DiscardV(dregs[i]);
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVi2xHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
+	}
+
+	static void PpcVfpuVx2iHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		int op2 = (op >> 16) & 3;
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		u32 s[4] = {}, d[4] = {};
+		int n = GetNumVectorElements(sz);
+		for (int i = 0; i < n; i++) {
+			memcpy(&s[i], &mips->v[voffset[sregs[i]]], 4);
+		}
+		VectorSize oz = V_Quad;
+		switch (op2) {
+		case 0: // vuc2i
+			{
+				u32 value = s[0];
+				for (int i = 0; i < 4; i++) {
+					d[i] = (u32)((value & 0xFF) * 0x01010101u) >> 1;
+					value >>= 8;
+				}
+				oz = V_Quad;
+			}
+			break;
+		case 1: // vc2i
+			{
+				u32 value = s[0];
+				d[0] = (value & 0xFF) << 24;
+				d[1] = (value & 0xFF00) << 16;
+				d[2] = (value & 0xFF0000) << 8;
+				d[3] = (value & 0xFF000000);
+				oz = V_Quad;
+			}
+			break;
+		case 2: // vus2i
+			{
+				int cnt = (sz == V_Single) ? 1 : 2;
+				oz = (sz == V_Single) ? V_Pair : V_Quad;
+				for (int i = 0; i < cnt; i++) {
+					u32 value = s[i];
+					d[i * 2] = (value & 0xFFFF) << 15;
+					d[i * 2 + 1] = (value & 0xFFFF0000) >> 1;
+				}
+			}
+			break;
+		case 3: // vs2i
+			{
+				int cnt = (sz == V_Single) ? 1 : 2;
+				oz = (sz == V_Single) ? V_Pair : V_Quad;
+				for (int i = 0; i < cnt; i++) {
+					u32 value = s[i];
+					d[i * 2] = (value & 0xFFFF) << 16;
+					d[i * 2 + 1] = value & 0xFFFF0000;
+				}
+			}
+			break;
+		}
+		GetVectorRegs(dregs, oz, _VD);
+		int on = GetNumVectorElements(oz);
+		for (int i = 0; i < on; i++) {
+			memcpy(&mips->v[voffset[dregs[i]]], &d[i], 4);
+		}
 	}
 
 	void Jit::Comp_Vx2i(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		int op2 = (op >> 16) & 3;
+		VectorSize oz = (op2 >= 2 && sz == V_Single) ? V_Pair : V_Quad;
+		int on = GetNumVectorElements(oz);
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, oz, _VD);
+		for (int i = 0; i < n; i++)
+			fpr.FlushV(sregs[i]);
+		for (int i = 0; i < on; i++)
+			fpr.DiscardV(dregs[i]);
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVx2iHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Jit::Comp_Vf2i(MIPSOpcode op) {
@@ -1362,7 +1561,7 @@ namespace MIPSComp
 			DISABLE;
 
 		int op2 = (op >> 21) & 0x1f;
-		if (op2 != 16 && op2 != 17)
+		if (op2 < 16 || op2 > 19)
 			DISABLE;
 
 		VectorSize sz = GetVecSize(op);
@@ -1378,20 +1577,26 @@ namespace MIPSComp
 			MOVI2F(FPR8, mult, false);
 
 		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		if (op2 == 18)
+			MTFSFI(7, 2); // Round toward +inf (vf2iu)
+		else if (op2 == 19)
+			MTFSFI(7, 3); // Round toward -inf (vf2id)
 		for (int i = 0; i < n; ++i) {
 			PPCReg src = fpr.V(sregs[i]);
 			if (imm != 0) {
 				FMULS(FPR7, src, FPR8);
 				src = FPR7;
 			}
-			if (op2 == 16)
-				FCTIW(FPR6, src);
-			else
+			if (op2 == 17)
 				FCTIWZ(FPR6, src);
+			else
+				FCTIW(FPR6, src);
 			SFD(FPR6, R1, 16);
 			LWZ(SREG, R1, 20);
 			STW(SREG, R1, 32 + i * 4);
 		}
+		if (op2 == 18 || op2 == 19)
+			MTFSFI(7, 0); // Restore round to nearest
 		for (int i = 0; i < n; ++i) {
 			fpr.DiscardV(dregs[i]);
 			LWZ(SREG, R1, 32 + i * 4);
@@ -1463,8 +1668,80 @@ namespace MIPSComp
 		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
+	static inline float PpcExpandHalf(u16 half) {
+		u32 s = (half >> 15) & 1;
+		u32 e = (half >> 10) & 0x1F;
+		u32 f = half & 0x3FF;
+		u32 res;
+		if (e == 0) {
+			if (f == 0) {
+				res = s << 31;
+			} else {
+				e = 127 - 14;
+				while ((f & 0x400) == 0) {
+					f <<= 1;
+					e--;
+				}
+				f &= 0x3FF;
+				res = (s << 31) | (e << 23) | (f << 13);
+			}
+		} else if (e == 31) {
+			res = (s << 31) | (0xFF << 23) | (f << 13);
+		} else {
+			res = (s << 31) | ((e + (127 - 15)) << 23) | (f << 13);
+		}
+		float out;
+		memcpy(&out, &res, 4);
+		return out;
+	}
+
+	static void PpcVfpuVh2fHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		u32 s0 = 0, s1 = 0;
+		memcpy(&s0, &mips->v[voffset[sregs[0]]], 4);
+		if (sz == V_Single) {
+			GetVectorRegs(dregs, V_Pair, _VD);
+			float d0 = PpcExpandHalf(s0 & 0xFFFF);
+			float d1 = PpcExpandHalf(s0 >> 16);
+			mips->v[voffset[dregs[0]]] = d0;
+			mips->v[voffset[dregs[1]]] = d1;
+		} else {
+			memcpy(&s1, &mips->v[voffset[sregs[1]]], 4);
+			GetVectorRegs(dregs, V_Quad, _VD);
+			float d0 = PpcExpandHalf(s0 & 0xFFFF);
+			float d1 = PpcExpandHalf(s0 >> 16);
+			float d2 = PpcExpandHalf(s1 & 0xFFFF);
+			float d3 = PpcExpandHalf(s1 >> 16);
+			mips->v[voffset[dregs[0]]] = d0;
+			mips->v[voffset[dregs[1]]] = d1;
+			mips->v[voffset[dregs[2]]] = d2;
+			mips->v[voffset[dregs[3]]] = d3;
+		}
+	}
+
 	void Jit::Comp_Vh2f(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.MayHavePrefix() || disablePrefixes) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		VectorSize oz = (sz == V_Single) ? V_Pair : V_Quad;
+		int n = (sz == V_Single) ? 1 : 2;
+		int on = GetNumVectorElements(oz);
+		u8 sregs[4], dregs[4];
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(dregs, oz, _VD);
+		for (int i = 0; i < n; i++)
+			fpr.FlushV(sregs[i]);
+		for (int i = 0; i < on; i++)
+			fpr.DiscardV(dregs[i]);
+		MR(R3, CTXREG);
+		MOVI2R(R4, op.encoding);
+		QuickCallFunction((void *)&PpcVfpuVh2fHelper);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Jit::Comp_Vcst(MIPSOpcode op) {
@@ -1494,7 +1771,35 @@ namespace MIPSComp
 	}
 
 	void Jit::Comp_Vhoriz(MIPSOpcode op) {
-		DISABLE;
+		CONDITIONAL_DISABLE;
+		if (js.HasUnknownPrefix() || disablePrefixes || js.MayHavePrefix()) {
+			DISABLE;
+		}
+		VectorSize sz = GetVecSize(op);
+		if (sz == V_Single) {
+			DISABLE;
+		}
+		int op2 = (op >> 16) & 0x1f;
+		if (op2 != 6 && op2 != 7) { // 6 = vfad, 7 = vavg
+			DISABLE;
+		}
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], dreg;
+		GetVectorRegs(sregs, sz, _VS);
+		GetVectorRegs(&dreg, V_Single, _VD);
+
+		fpr.MapRegsAndSpillLockV(sregs, sz, 0);
+		FADDS(FPR6, fpr.V(sregs[0]), fpr.V(sregs[1]));
+		for (int i = 2; i < n; i++) {
+			FADDS(FPR6, FPR6, fpr.V(sregs[i]));
+		}
+		if (op2 == 7) { // vavg
+			MOVI2F(FPR7, 1.0f / (float)n, false);
+			FMULS(FPR6, FPR6, FPR7);
+		}
+		fpr.MapRegV(dreg, MAP_DIRTY | MAP_NOINIT);
+		FMR(fpr.V(dreg), FPR6);
+		fpr.ReleaseSpillLocksAndDiscardTemps();
 	}
 
 	void Jit::Comp_VRot(MIPSOpcode op) {

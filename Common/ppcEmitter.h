@@ -424,6 +424,7 @@ namespace PpcGen
 		// Fpu compare
 		void FCMPU	(int Bf, PPCReg FRa, PPCReg FRb); // unordered
 		void FCMPO	(int Bf, PPCReg FRa, PPCReg FRb); // ordered
+		void MTFSFI	(int crfD, int imm) { Write32((63 << 26) | ((crfD & 7) << 23) | ((imm & 15) << 12) | (134 << 1)); }
 
 		// Fpu convert
 		void FRIN	(PPCReg FRt, PPCReg FRb);	// round
