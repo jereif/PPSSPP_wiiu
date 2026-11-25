@@ -462,11 +462,10 @@ void Jit::WriteExit(u32 destination, int exit_num)
 
 void Jit::WriteExitDestInR(PPCReg Reg) 
 {
-	//Break();
-	MovToPC(Reg);
+	if (Reg != R3)
+		MR(R3, Reg);
 	WriteDownCount();
-	// TODO: shouldn't need an indirect branch here...
-	B((const void *)dispatcher);
+	B((const void *)dispatcherPCInR3);
 }
 
 void Jit::WriteSyscallExit()

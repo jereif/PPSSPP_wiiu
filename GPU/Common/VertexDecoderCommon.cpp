@@ -43,6 +43,51 @@ static const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
 static const u8 possize[4] = { 3, 3, 6, 12 }, posalign[4] = { 1, 1, 2, 4 };
 static const u8 wtsize[4] = { 0, 1, 2, 4 }, wtalign[4] = { 0, 1, 2, 4 };
 
+#ifdef __wiiu__
+struct WiiUVdecStats {
+	u64 skFastVerts;
+	u64 nsFastVerts;
+	u64 inlineVerts;
+	u64 stepVerts;
+	u32 topType;
+	u64 topVerts;
+	u32 topType2;
+	u64 topVerts2;
+};
+static WiiUVdecStats g_vdecStats = {};
+
+void WiiULogVdecStats(int frames) {
+	if (frames <= 0) return;
+	u64 total = g_vdecStats.skFastVerts + g_vdecStats.nsFastVerts + g_vdecStats.inlineVerts + g_vdecStats.stepVerts;
+	if (total > 0) {
+		NOTICE_LOG(G3D, "vdec: %llu v/f (skFast=%llu nsFast=%llu inline=%llu steps=%llu) top=%06x(%llu/f) #2=%06x(%llu/f)",
+			(unsigned long long)(total / frames),
+			(unsigned long long)(g_vdecStats.skFastVerts / frames),
+			(unsigned long long)(g_vdecStats.nsFastVerts / frames),
+			(unsigned long long)(g_vdecStats.inlineVerts / frames),
+			(unsigned long long)(g_vdecStats.stepVerts / frames),
+			(unsigned)g_vdecStats.topType, (unsigned long long)(g_vdecStats.topVerts / frames),
+			(unsigned)g_vdecStats.topType2, (unsigned long long)(g_vdecStats.topVerts2 / frames));
+	}
+	g_vdecStats = {};
+}
+
+static inline void TrackVdecType(u32 vt, u64 cnt) {
+	if (vt == g_vdecStats.topType) {
+		g_vdecStats.topVerts += cnt;
+	} else if (vt == g_vdecStats.topType2) {
+		g_vdecStats.topVerts2 += cnt;
+		if (g_vdecStats.topVerts2 > g_vdecStats.topVerts) {
+			std::swap(g_vdecStats.topType, g_vdecStats.topType2);
+			std::swap(g_vdecStats.topVerts, g_vdecStats.topVerts2);
+		}
+	} else if (cnt > g_vdecStats.topVerts2) {
+		g_vdecStats.topType2 = vt;
+		g_vdecStats.topVerts2 = cnt;
+	}
+}
+#endif
+
 // When software skinning. This array is only used when non-jitted - when jitted, the matrix
 // is kept in registers.
 alignas(16) static float skinMatrix[12];
@@ -1878,6 +1923,8 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 				break;
 			}
 			if (handled) {
+				g_vdecStats.skFastVerts += (u64)count;
+				TrackVdecType(fmt_ & 0xFFFFFF, (u64)count);
 				gstate_c.vertexFullAlpha = fullAlpha;
 				return;
 			}
@@ -1935,10 +1982,18 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 				break;
 			}
 			if (handled) {
+#ifdef __wiiu__
+				g_vdecStats.nsFastVerts += (u64)count;
+				TrackVdecType(fmt_ & 0xFFFFFF, (u64)count);
+#endif
 				gstate_c.vertexFullAlpha = fullAlpha;
 				return;
 			}
 		}
+#ifdef __wiiu__
+		g_vdecStats.inlineVerts += (u64)count;
+		TrackVdecType(fmt_ & 0xFFFFFF, (u64)count);
+#endif
 
 		for (; count > 0; --count) {
 			float weights[8];
@@ -2121,6 +2176,10 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 		}
 		gstate_c.vertexFullAlpha = fullAlpha;
 	} else {
+#ifdef __wiiu__
+		g_vdecStats.stepVerts += (u64)count;
+		TrackVdecType(fmt_ & 0xFFFFFF, (u64)count);
+#endif
 		// Interpret the decode steps
 		for (; count; count--) {
 			for (int i = 0; i < numSteps_; i++) {

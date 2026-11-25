@@ -187,6 +187,47 @@ namespace MIPSComp
 		{
 		case 50: //lv.s  // VI(vt) = Memory::Read_U32(addr);
 			{
+				if (!js.inDelaySlot && !gpr.IsImm(rs)) {
+					int vts[4] = { vt, 0, 0, 0 };
+					s32 offs[4] = { imm, 0, 0, 0 };
+					MIPSOpcode nextOps[4];
+					int n = 1;
+					while (n < 4) {
+						MIPSOpcode nop = Memory::Read_Opcode_JIT(js.compilerPC + n * 4);
+						if ((nop >> 26) != 50 || (int)MIPS_GET_RS(nop) != rs)
+							break;
+						int nvt = ((nop >> 16) & 0x1f) | ((nop & 3) << 5);
+						bool dup = false;
+						for (int k = 0; k < n; ++k) {
+							if (vts[k] == nvt) { dup = true; break; }
+						}
+						if (dup)
+							break;
+						vts[n] = nvt;
+						offs[n] = (s16)(nop & 0xFFFC);
+						nextOps[n] = nop;
+						n++;
+					}
+					if (n >= 2) {
+						for (int k = 1; k < n; ++k)
+							EatInstruction(nextOps[k]);
+						gpr.MapReg(rs);
+						for (int k = 0; k < n; ++k)
+							fpr.SpillLockV(vts[k]);
+						for (int k = 0; k < n; ++k)
+							fpr.MapRegV(vts[k], MAP_DIRTY | MAP_NOINIT);
+						for (int k = 0; k < n; ++k) {
+							SetRegToEffectiveAddress(SREG, rs, (s16)offs[k]);
+							LWBRX(R6, BASEREG, SREG);
+							STW(R6, R1, 16 + k * 4);
+						}
+						for (int k = 0; k < n; ++k) {
+							LFS(fpr.V(vts[k]), R1, 16 + k * 4);
+						}
+						fpr.ReleaseSpillLocksAndDiscardTemps();
+						break;
+					}
+				}
 				// CC might be set by slow path below, so load regs first.
 				fpr.MapRegV(vt, MAP_DIRTY | MAP_NOINIT);
 				if (gpr.IsImm(rs)) {
@@ -203,6 +244,40 @@ namespace MIPSComp
 
 		case 58: //sv.s   // Memory::Write_U32(VI(vt), addr);
 			{
+				if (!js.inDelaySlot && !gpr.IsImm(rs)) {
+					int vts[4] = { vt, 0, 0, 0 };
+					s32 offs[4] = { imm, 0, 0, 0 };
+					MIPSOpcode nextOps[4];
+					int n = 1;
+					while (n < 4) {
+						MIPSOpcode nop = Memory::Read_Opcode_JIT(js.compilerPC + n * 4);
+						if ((nop >> 26) != 58 || (int)MIPS_GET_RS(nop) != rs)
+							break;
+						vts[n] = ((nop >> 16) & 0x1f) | ((nop & 3) << 5);
+						offs[n] = (s16)(nop & 0xFFFC);
+						nextOps[n] = nop;
+						n++;
+					}
+					if (n >= 2) {
+						for (int k = 1; k < n; ++k)
+							EatInstruction(nextOps[k]);
+						gpr.MapReg(rs);
+						for (int k = 0; k < n; ++k)
+							fpr.SpillLockV(vts[k]);
+						for (int k = 0; k < n; ++k)
+							fpr.MapRegV(vts[k]);
+						for (int k = 0; k < n; ++k) {
+							SFS(fpr.V(vts[k]), R1, 16 + k * 4);
+						}
+						for (int k = 0; k < n; ++k) {
+							SetRegToEffectiveAddress(SREG, rs, (s16)offs[k]);
+							LWZ(R6, R1, 16 + k * 4);
+							STWBRX(R6, BASEREG, SREG);
+						}
+						fpr.ReleaseSpillLocksAndDiscardTemps();
+						break;
+					}
+				}
 				// CC might be set by slow path below, so load regs first.
 				fpr.MapRegV(vt);
 				if (gpr.IsImm(rs)) {

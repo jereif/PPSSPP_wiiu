@@ -225,6 +225,8 @@ void GX2GraphicsContext::SwapBuffers() {
 				geMs, primMs, flushMs, stateMs, decMs, hashMs, vdecMs, uboMs, drawMs,
 				(double)g_gx2Perf.draws / accCount, (double)g_gx2Perf.swDraws / accCount);
 			MIPSComp::PpcJitLogRuntimeFallbacks(accCount);
+			extern void WiiULogVdecStats(int frames);
+			WiiULogVdecStats(accCount);
 			accFrame = accFlip = 0.0;
 			accCount = 0;
 			g_gx2Perf = {};

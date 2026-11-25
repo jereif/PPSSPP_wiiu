@@ -326,6 +326,7 @@ namespace MIPSComp
 		const u8 *outerLoopPCInR0;
 		const u8 *dispatcherCheckCoreState;
 		const u8 *dispatcherPCInR0;
+		const u8 *dispatcherPCInR3;
 		const u8 *dispatcher;
 		const u8 *dispatcherNoCheck;
 

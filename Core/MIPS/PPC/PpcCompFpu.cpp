@@ -80,6 +80,51 @@ void Jit::Comp_FPULS(MIPSOpcode op) {
 	switch(op >> 26)
 	{
 	case 49: //FI(ft) = Memory::Read_U32(addr); break; //lwc1
+		if (!js.inDelaySlot && !gpr.IsImm(rs)) {
+			// Pipeline up to 4 consecutive lwc1 with the same base register into distinct stack slots
+			// (16..28(R1)) to hide PowerPC 750CL's 10-cycle STW->LFS store-forwarding stall.
+			int fts[4] = { ft, 0, 0, 0 };
+			s32 offs[4] = { offset, 0, 0, 0 };
+			MIPSOpcode nextOps[4];
+			int n = 1;
+			while (n < 4) {
+				MIPSOpcode nop = Memory::Read_Opcode_JIT(js.compilerPC + n * 4);
+				if ((nop >> 26) != 49 || (int)MIPS_GET_RS(nop) != rs)
+					break;
+				int nft = MIPS_GET_FT(nop);
+				bool dup = false;
+				for (int k = 0; k < n; ++k) {
+					if (fts[k] == nft) { dup = true; break; }
+				}
+				if (dup)
+					break;
+				fts[n] = nft;
+				offs[n] = (s16)(nop & 0xFFFF);
+				nextOps[n] = nop;
+				n++;
+			}
+			if (n >= 2) {
+				for (int k = 1; k < n; ++k)
+					EatInstruction(nextOps[k]);
+				gpr.MapReg(rs);
+				for (int k = 0; k < n; ++k)
+					fpr.SpillLock(fts[k]);
+				for (int k = 0; k < n; ++k)
+					fpr.MapReg(fts[k], MAP_NOINIT | MAP_DIRTY);
+				// Phase 1: all byte-swapped loads + stores to separate stack slots.
+				for (int k = 0; k < n; ++k) {
+					SetRegToEffectiveAddress(SREG, rs, (s16)offs[k]);
+					LWBRX(R6, BASEREG, SREG);
+					STW(R6, R1, 16 + k * 4);
+				}
+				// Phase 2: all float loads from stack slots (store-forwarding latency hidden).
+				for (int k = 0; k < n; ++k) {
+					LFS(fpr.R(fts[k]), R1, 16 + k * 4);
+				}
+				fpr.ReleaseSpillLocksAndDiscardTemps();
+				break;
+			}
+		}
 		fpr.SpillLock(ft);
 		fpr.MapReg(ft, MAP_NOINIT | MAP_DIRTY);
 		if (gpr.IsImm(rs)) {
@@ -96,6 +141,43 @@ void Jit::Comp_FPULS(MIPSOpcode op) {
 		break;
 
 	case 57: //Memory::Write_U32(FI(ft), addr); break; //swc1
+		if (!js.inDelaySlot && !gpr.IsImm(rs)) {
+			// Pipeline up to 4 consecutive swc1 with the same base register into distinct stack slots.
+			int fts[4] = { ft, 0, 0, 0 };
+			s32 offs[4] = { offset, 0, 0, 0 };
+			MIPSOpcode nextOps[4];
+			int n = 1;
+			while (n < 4) {
+				MIPSOpcode nop = Memory::Read_Opcode_JIT(js.compilerPC + n * 4);
+				if ((nop >> 26) != 57 || (int)MIPS_GET_RS(nop) != rs)
+					break;
+				fts[n] = MIPS_GET_FT(nop);
+				offs[n] = (s16)(nop & 0xFFFF);
+				nextOps[n] = nop;
+				n++;
+			}
+			if (n >= 2) {
+				for (int k = 1; k < n; ++k)
+					EatInstruction(nextOps[k]);
+				gpr.MapReg(rs);
+				for (int k = 0; k < n; ++k)
+					fpr.SpillLock(fts[k]);
+				for (int k = 0; k < n; ++k)
+					fpr.MapReg(fts[k]);
+				// Phase 1: all float stores to separate stack slots.
+				for (int k = 0; k < n; ++k) {
+					SFS(fpr.R(fts[k]), R1, 16 + k * 4);
+				}
+				// Phase 2: all byte-swapped integer stores to PSP RAM.
+				for (int k = 0; k < n; ++k) {
+					SetRegToEffectiveAddress(SREG, rs, (s16)offs[k]);
+					LWZ(R6, R1, 16 + k * 4);
+					STWBRX(R6, BASEREG, SREG);
+				}
+				fpr.ReleaseSpillLocksAndDiscardTemps();
+				break;
+			}
+		}
 		fpr.MapReg(ft);
 		if (gpr.IsImm(rs)) {
 			u32 addr = (offset + gpr.GetImm(rs)) & 0x3FFFFFFF;

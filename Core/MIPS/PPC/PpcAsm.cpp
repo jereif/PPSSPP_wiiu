@@ -181,9 +181,13 @@ void Jit::GenerateFixedCode() {
 
 		// Keep current location, TODO rename it, outerLoopPCInR0 to outerLoopPCInSREG ?? 
 		dispatcherPCInR0 = GetCodePtr();
+		MR(R3, SREG);
 
-		// mips->pc = SREG
-		MovToPC(SREG);
+		// Fast entry with target PC already in R3 (avoids STW(pc) -> LWZ(pc) store-forwarding stall on jr $ra / jalr / unlinked exits).
+		dispatcherPCInR3 = GetCodePtr();
+		MovToPC(R3);
+		FixupBranch bailFromR3 = BLT();
+		FixupBranch skipPcReload = B();
 
 		// At this point : flags = EQ. Fine for the next check, no need to jump over it.
 		// label dispatcher:
@@ -208,6 +212,8 @@ void Jit::GenerateFixedCode() {
 			// read op
 			// R3 = mips->pc & Memory::MEMVIEW32_MASK
 			LWZ(R3, CTXREG, offsetof(MIPSState, pc));
+
+			SetJumpTarget(skipPcReload);
 			// & Memory::MEMVIEW32_MASK
 			RLWINM(R3, R3, 0, 2, 31);
 
@@ -252,6 +258,7 @@ void Jit::GenerateFixedCode() {
 
 		// label bail:
 		SetJumpTarget(bail);
+		SetJumpTarget(bailFromR3);
 
 		// label bailCoreState:
 		SetJumpTarget(bailCoreState);
