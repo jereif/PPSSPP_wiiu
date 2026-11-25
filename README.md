@@ -58,15 +58,6 @@ No PSP BIOS file is required — PPSSPP uses High-Level Emulation (HLE).
 Check the community compatibility sheet and report any games you test directly in it (Game ID, FPS, and graphical/audio notes):
 **[PPSSPP Wii U Compatibility List (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)**
 
-| Game | Status | Observed Performance | Notes / Known Issues |
-|---|---|---|---|
-| **Tekken 6** | Playable | ~45–60 FPS | Character/bone rendering fixed in GX2. |
-| **Silent Hill: Shattered Memories** | Playable | 45–60 FPS (25+ FPS in heaviest outdoor scenes) | Smooth in interiors and most exteriors; heavy outdoor scenes are CPU/vertex-bound. |
-| **God of War: Ghost of Sparta** | Playable | 38–51 FPS (28–38 FPS in 950+ draw combat) | Some 2D sprite glitches. |
-| **God of War: Chains of Olympus** | Playable | 30–45 FPS | Some 2D sprite glitches. |
-| **GTA: Liberty City Stories** | Playable | 25–40 FPS | Minor character head/mesh glitch. |
-| **GTA: Chinatown Wars** | Playable | 50–60 FPS | Runs smoothly. |
-
 ---
 
 ## Known Limitations
