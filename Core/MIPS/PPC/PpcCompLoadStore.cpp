@@ -106,6 +106,67 @@ void Jit::Comp_ITypeMem(MIPSOpcode op) {
 		case 40: //sb
 		case 41: //sh
 		case 43: //sw
+			// Fuse 2-8 consecutive lw or sw sharing the same base register rs.
+			// Computes the masked effective address (rs + off[0]) & 0x3FFFFFFF once in SREG,
+			// then steps SREG by delta without repeating RLWINM (saves 1 inst per extra op,
+			// plus 1 more inst per extra sw $zero).
+			if ((o == 35 || o == 43) && !js.inDelaySlot && !gpr.IsImm(rs) && !(load && rt == rs)) {
+				int rts[8] = { rt };
+				s32 offs[8] = { offset };
+				MIPSOpcode nextOps[8];
+				int n = 1;
+				while (n < 8) {
+					MIPSOpcode nop = Memory::Read_Opcode_JIT(js.compilerPC + n * 4);
+					if ((int)(nop >> 26) != o || (int)((nop >> 21) & 0x1F) != rs)
+						break;
+					int nrt = (nop >> 16) & 0x1F;
+					if (load && nrt == 0)
+						break;
+					s32 noff = (s16)(nop & 0xFFFF);
+					s32 span = noff - offs[0];
+					s32 delta = noff - offs[n - 1];
+					if (span < -4096 || span > 4096 || delta < -32768 || delta > 32767)
+						break;
+					rts[n] = nrt;
+					offs[n] = noff;
+					nextOps[n] = nop;
+					n++;
+					if (load && nrt == rs)
+						break;
+				}
+				if (n >= 2) {
+					for (int k = 1; k < n; ++k)
+						EatInstruction(nextOps[k]);
+					gpr.MapReg(rs);
+					SetRegToEffectiveAddress(SREG, rs, (s16)offs[0]);
+					bool zeroLoaded = false;
+					for (int k = 0; k < n; ++k) {
+						if (k > 0) {
+							s32 delta = offs[k] - offs[k - 1];
+							if (delta != 0)
+								ADDI(SREG, SREG, (s16)delta);
+						}
+						if (load) {
+							gpr.MapReg(rts[k], MAP_NOINIT | MAP_DIRTY);
+							LWBRX(gpr.R(rts[k]), BASEREG, SREG);
+						} else {
+							PPCReg vreg;
+							if (rts[k] == 0) {
+								if (!zeroLoaded) {
+									MOVI2R(R6, 0);
+									zeroLoaded = true;
+								}
+								vreg = R6;
+							} else {
+								gpr.MapReg(rts[k], 0);
+								vreg = gpr.R(rts[k]);
+							}
+							STWBRX(vreg, BASEREG, SREG);
+						}
+					}
+					break;
+				}
+			}
 
 			PPCReg valReg;
 			if (!load && rt == 0) {

@@ -379,6 +379,16 @@ VertexArrayInfoGX2::~VertexArrayInfoGX2() {
 
 static u32 SwapRB(u32 c) { return (c & 0xFF00FF00) | ((c >> 16) & 0xFF) | ((c << 16) & 0xFF0000); }
 
+static inline void DcbzRange(void *ptr, int bytes) {
+#if defined(__wiiu__) || defined(__PPC__)
+	uintptr_t start = ((uintptr_t)ptr + 31u) & ~(uintptr_t)31u;
+	uintptr_t end = ((uintptr_t)ptr + (uintptr_t)bytes) & ~(uintptr_t)31u;
+	for (uintptr_t p = start; p < end; p += 32) {
+		asm volatile("dcbz 0, %0" : : "b"(p) : "memory");
+	}
+#endif
+}
+
 // The inline wrapper in the header checks for numDrawCalls == 0
 void DrawEngineGX2::DoFlush() {
 	PROFILE_THIS_SCOPE("Flush");
@@ -422,13 +432,31 @@ void DrawEngineGX2::DoFlush() {
 			if (decodeCounter_ == 0 && numDrawCalls >= 1) {
 				int totalVerts = 0;
 				for (int i = 0; i < numDrawCalls; i++) {
-					totalVerts += drawCalls[i].indexUpperBound - drawCalls[i].indexLowerBound + 1;
+					const DeferredDrawCall &dc = drawCalls[i];
+					if (dc.indexType == (GE_VTYPE_IDX_NONE >> GE_VTYPE_IDX_SHIFT)) {
+						totalVerts += dc.indexUpperBound - dc.indexLowerBound + 1;
+					} else {
+						int lo = dc.indexLowerBound;
+						int hi = dc.indexUpperBound;
+						int lastMatch = i;
+						for (int j = i + 1; j < numDrawCalls; ++j) {
+							if (drawCalls[j].verts != dc.verts)
+								break;
+							if (drawCalls[j].indexLowerBound < lo) lo = drawCalls[j].indexLowerBound;
+							if (drawCalls[j].indexUpperBound > hi) hi = drawCalls[j].indexUpperBound;
+							lastMatch = j;
+						}
+						totalVerts += hi - lo + 1;
+						i = lastMatch;
+					}
 				}
 				int vSize = totalVerts * (int)dec_->GetDecVtxFmt().stride;
-				if (vSize > 0) {
+				if (vSize > 0 && totalVerts <= VERTEX_BUFFER_MAX) {
 					u32 vOffset;
 					pushedVerts = pushVerts_->BeginPush(&vOffset, vSize);
 					pushedVertSize = vSize;
+					if (numDrawCalls > 1 || totalVerts < 128)
+						DcbzRange(pushedVerts, vSize);
 					DecodeVerts(pushedVerts);
 					pushVerts_->EndPush();
 					return;
@@ -715,6 +743,7 @@ void DrawEngineGX2::DoFlush() {
 				u32 vOffset;
 				int vSize = (maxIndex + 1) * dec_->GetDecVtxFmt().stride;
 				u8 *vptr = pushVerts_->BeginPush(&vOffset, vSize);
+				DcbzRange(vptr, vSize);
 				memcpy(vptr, decoded, vSize);
 				pushVerts_->EndPush();
 				GX2SetAttribBuffer(0, vSize, stride, vptr);
@@ -723,6 +752,7 @@ void DrawEngineGX2::DoFlush() {
 				u32 iOffset;
 				int iSize = 2 * indexGen.VertexCount();
 				u8 *iptr = pushInds_->BeginPush(&iOffset, iSize);
+				DcbzRange(iptr, iSize);
 				memcpy(iptr, decIndex, iSize);
 				pushInds_->EndPush();
 				GX2DrawIndexedEx(GX2prim[prim], vertexCount, GX2_INDEX_TYPE_U16, iptr, 0, 1);

@@ -4,6 +4,7 @@
 #include "Common/Serialize/Serializer.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
+#include "Core/MemMap.h"
 #include "Core/MIPS/MIPS.h"
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/MIPS/MIPSInt.h"
@@ -492,6 +493,27 @@ using namespace PpcJitConstants;
 			if (gpr.IsImm(rt)) {
 				gpr.SetImm(rd, gpr.GetImm(rt) << sa);
 			} else {
+				// Peephole: fuse MIPS sll+sra/srl sign/zero-extend sequences into 1 PPC instruction.
+				if (!js.inDelaySlot && (sa == 16 || sa == 24)) {
+					MIPSOpcode nextOp = Memory::Read_Opcode_JIT(js.compilerPC + 4);
+					if ((nextOp >> 26) == 0 && (int)MIPS_GET_RT(nextOp) == rd && (int)MIPS_GET_RD(nextOp) == rd && (int)MIPS_GET_SA(nextOp) == sa) {
+						u32 nfn = nextOp & 0x3f;
+						if (nfn == 3) { // sra -> extsb / extsh
+							EatInstruction(nextOp);
+							gpr.MapDirtyIn(rd, rt);
+							if (sa == 24)
+								EXTSB(gpr.R(rd), gpr.R(rt));
+							else
+								EXTSH(gpr.R(rd), gpr.R(rt));
+							break;
+						} else if (nfn == 2 && MIPS_GET_RS(nextOp) == 0) { // srl -> zero-extend byte/half
+							EatInstruction(nextOp);
+							gpr.MapDirtyIn(rd, rt);
+							RLWINM(gpr.R(rd), gpr.R(rt), 0, sa, 31);
+							break;
+						}
+					}
+				}
 				gpr.MapDirtyIn(rd, rt);
 				SLWI(gpr.R(rd), gpr.R(rt), sa);
 			}

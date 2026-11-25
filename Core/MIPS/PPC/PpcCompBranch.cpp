@@ -343,12 +343,22 @@ void Jit::Comp_Jump(MIPSOpcode op) {
 		break;
 
 	case 3: //jal
-		gpr.MapReg(MIPS_REG_RA, MAP_NOINIT | MAP_DIRTY);
-		MOVI2R(gpr.R(MIPS_REG_RA), js.compilerPC + 8);
-		CompileDelaySlot(DELAYSLOT_NICE);
-		FlushAll();
+	{
+		MIPSOpcode delaySlotOp = Memory::Read_Instruction(js.compilerPC + 4);
+		if (IsDelaySlotNiceReg(op, delaySlotOp, MIPS_REG_RA)) {
+			CompileDelaySlot(DELAYSLOT_NICE);
+			FlushAll();
+			MOVI2R(SREG, js.compilerPC + 8);
+			STW(SREG, CTXREG, MIPS_REG_RA * 4);
+		} else {
+			gpr.MapReg(MIPS_REG_RA, MAP_NOINIT | MAP_DIRTY);
+			MOVI2R(gpr.R(MIPS_REG_RA), js.compilerPC + 8);
+			CompileDelaySlot(DELAYSLOT_NICE);
+			FlushAll();
+		}
 		WriteExit(targetAddr, 0);
 		break;
+	}
 
 	default:
 		_dbg_assert_msg_(0,"Trying to compile instruction that can't be compiled");

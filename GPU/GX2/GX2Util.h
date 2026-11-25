@@ -67,8 +67,14 @@ public:
 	void EndPush() {
 		if(push_size_) {
 			// Push buffer advances monotonically until wrap, so GPU has no stale cache lines for this range.
-			// DCStoreRange flushes CPU D-cache to MEM2 without emitting a per-draw GPU SURFACE_SYNC packet.
-			DCStoreRange(buffer_ + pos_, push_size_);
+			// Inline dcbst loop + eieio avoids coreinit PLT overhead and ~3,500 full PowerPC sync stalls/frame;
+			// GX2 issues a full barrier before kicking the PM4 command ring to the GPU.
+			uintptr_t start = (uintptr_t)(buffer_ + pos_) & ~(uintptr_t)31u;
+			uintptr_t end = ((uintptr_t)(buffer_ + pos_ + push_size_) + 31u) & ~(uintptr_t)31u;
+			for (uintptr_t p = start; p < end; p += 32) {
+				asm volatile("dcbst 0, %0" : : "b"(p) : "memory");
+			}
+			asm volatile("eieio" : : : "memory");
 			pos_ += push_size_;
 			push_size_ = 0;
 		}

@@ -37,6 +37,72 @@
 #include "GPU/Math3D.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 
+#ifdef __wiiu__
+#include <atomic>
+#include <wiiu/os/thread.h>
+#include <wiiu/os/time.h>
+
+namespace {
+struct Core0VdecJob {
+	void (*fn)(const Core0VdecJob &job, bool &fullAlpha);
+	const u8 *p;
+	u8 *d;
+	int count;
+	int inSize;
+	int stride;
+	int nw;
+	int numBones;
+	int tcOff, uvOff;
+	float uMul, vMul, uAdd, vAdd;
+	int cOff, dc0Off, nOff, dnOff, pOff, dpOff;
+	bool fullAlpha;
+};
+
+static OSThread g_vdecCore0Thread;
+alignas(16) static u8 g_vdecCore0Stack[64 * 1024];
+static bool g_vdecCore0Started = false;
+static std::atomic<int> g_vdecCore0Req{0};
+static Core0VdecJob g_vdecCore0Job{};
+
+static inline void VdecDcbzRange(void *ptr, int bytes) {
+	uintptr_t start = ((uintptr_t)ptr + 31u) & ~(uintptr_t)31u;
+	uintptr_t end = ((uintptr_t)ptr + (uintptr_t)bytes) & ~(uintptr_t)31u;
+	for (uintptr_t p = start; p < end; p += 32) {
+		asm volatile("dcbz 0, %0" : : "b"(p) : "memory");
+	}
+}
+
+static int Core0VdecThreadEntry(int argc, const char **argv) {
+	int idleSpins = 0;
+	while (true) {
+		if (g_vdecCore0Req.load(std::memory_order_acquire) == 1) {
+			idleSpins = 0;
+			bool fa = true;
+			VdecDcbzRange(g_vdecCore0Job.d, g_vdecCore0Job.count * g_vdecCore0Job.stride);
+			g_vdecCore0Job.fn(g_vdecCore0Job, fa);
+			g_vdecCore0Job.fullAlpha = fa;
+			g_vdecCore0Req.store(2, std::memory_order_release);
+		} else {
+			if (++idleSpins > 4000) {
+				OSSleepTicks(us_to_ticks(100));
+			}
+		}
+	}
+	return 0;
+}
+
+static inline void EnsureCore0VdecThread() {
+	if (!g_vdecCore0Started) {
+		g_vdecCore0Started = true;
+		if (OSCreateThread(&g_vdecCore0Thread, (OSThreadEntryPointFn)Core0VdecThreadEntry, 0, nullptr,
+			g_vdecCore0Stack + sizeof(g_vdecCore0Stack), sizeof(g_vdecCore0Stack), 16, OS_THREAD_ATTRIB_AFFINITY_CPU0)) {
+			OSResumeThread(&g_vdecCore0Thread);
+		}
+	}
+}
+} // namespace
+#endif
+
 static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
 static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
 static const u8 nrmsize[4] = { 0, 3, 6, 12 }, nrmalign[4] = { 0, 1, 2, 4 };
@@ -409,6 +475,41 @@ static void DecodeHWSkinnedT(
 	bool &fullAlpha) {
 	const float * __restrict u8Lut = (WT == 1 || TC == 1) ? GetU8Div128Lut() : nullptr;
 	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
+#ifdef __wiiu__
+	if (count >= 128 && g_vdecCore0Req.load(std::memory_order_relaxed) == 0 && OSGetCurrentThread() != &g_vdecCore0Thread) {
+		EnsureCore0VdecThread();
+		int half = (count >> 1) & ~7;
+		if (half >= 64) {
+			g_vdecCore0Job.fn = [](const Core0VdecJob &j, bool &fa) {
+				DecodeHWSkinnedT<WT, TC, COL, NRM, POS>(j.p, j.d, j.count, j.inSize, j.stride, j.nw, j.numBones,
+					j.tcOff, j.uvOff, j.uMul, j.vMul, j.uAdd, j.vAdd, j.cOff, j.dc0Off, j.nOff, j.dnOff, j.pOff, j.dpOff, fa);
+			};
+			g_vdecCore0Job.p = p + half * inSize;
+			g_vdecCore0Job.d = d + half * stride;
+			g_vdecCore0Job.count = count - half;
+			g_vdecCore0Job.inSize = inSize;
+			g_vdecCore0Job.stride = stride;
+			g_vdecCore0Job.nw = nw;
+			g_vdecCore0Job.numBones = numBones;
+			g_vdecCore0Job.tcOff = tcOff; g_vdecCore0Job.uvOff = uvOff;
+			g_vdecCore0Job.uMul = uMul; g_vdecCore0Job.vMul = vMul;
+			g_vdecCore0Job.uAdd = uAdd; g_vdecCore0Job.vAdd = vAdd;
+			g_vdecCore0Job.cOff = cOff; g_vdecCore0Job.dc0Off = dc0Off;
+			g_vdecCore0Job.nOff = nOff; g_vdecCore0Job.dnOff = dnOff;
+			g_vdecCore0Job.pOff = pOff; g_vdecCore0Job.dpOff = dpOff;
+			g_vdecCore0Req.store(1, std::memory_order_release);
+
+			VdecDcbzRange(d, half * stride);
+			DecodeHWSkinnedT<WT, TC, COL, NRM, POS>(p, d, half, inSize, stride, nw, numBones,
+				tcOff, uvOff, uMul, vMul, uAdd, vAdd, cOff, dc0Off, nOff, dnOff, pOff, dpOff, fullAlpha);
+
+			while (g_vdecCore0Req.load(std::memory_order_acquire) != 2) {}
+			fullAlpha &= g_vdecCore0Job.fullAlpha;
+			g_vdecCore0Req.store(0, std::memory_order_relaxed);
+			return;
+		}
+	}
+#endif
 	auto decodeOne = [&](const u8 * __restrict sp, u8 * __restrict sd) {
 		float *outW = (float *)sd;
 		if (WT == 3) {
@@ -511,6 +612,39 @@ static void DecodeNonSkinnedT(
 	bool &fullAlpha) {
 	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
 	const float * __restrict u8Lut = (TC == 1) ? GetU8Div128Lut() : nullptr;
+#ifdef __wiiu__
+	if (count >= 128 && g_vdecCore0Req.load(std::memory_order_relaxed) == 0 && OSGetCurrentThread() != &g_vdecCore0Thread) {
+		EnsureCore0VdecThread();
+		int half = (count >> 1) & ~7;
+		if (half >= 64) {
+			g_vdecCore0Job.fn = [](const Core0VdecJob &j, bool &fa) {
+				DecodeNonSkinnedT<TC, COL, NRM, POS>(j.p, j.d, j.count, j.inSize, j.stride,
+					j.tcOff, j.uvOff, j.uMul, j.vMul, j.uAdd, j.vAdd, j.cOff, j.dc0Off, j.nOff, j.dnOff, j.pOff, j.dpOff, fa);
+			};
+			g_vdecCore0Job.p = p + half * inSize;
+			g_vdecCore0Job.d = d + half * stride;
+			g_vdecCore0Job.count = count - half;
+			g_vdecCore0Job.inSize = inSize;
+			g_vdecCore0Job.stride = stride;
+			g_vdecCore0Job.tcOff = tcOff; g_vdecCore0Job.uvOff = uvOff;
+			g_vdecCore0Job.uMul = uMul; g_vdecCore0Job.vMul = vMul;
+			g_vdecCore0Job.uAdd = uAdd; g_vdecCore0Job.vAdd = vAdd;
+			g_vdecCore0Job.cOff = cOff; g_vdecCore0Job.dc0Off = dc0Off;
+			g_vdecCore0Job.nOff = nOff; g_vdecCore0Job.dnOff = dnOff;
+			g_vdecCore0Job.pOff = pOff; g_vdecCore0Job.dpOff = dpOff;
+			g_vdecCore0Req.store(1, std::memory_order_release);
+
+			VdecDcbzRange(d, half * stride);
+			DecodeNonSkinnedT<TC, COL, NRM, POS>(p, d, half, inSize, stride,
+				tcOff, uvOff, uMul, vMul, uAdd, vAdd, cOff, dc0Off, nOff, dnOff, pOff, dpOff, fullAlpha);
+
+			while (g_vdecCore0Req.load(std::memory_order_acquire) != 2) {}
+			fullAlpha &= g_vdecCore0Job.fullAlpha;
+			g_vdecCore0Req.store(0, std::memory_order_relaxed);
+			return;
+		}
+	}
+#endif
 	auto decodeOne = [&](const u8 * __restrict sp, u8 * __restrict sd) {
 		if (TC == 2) {
 			float *uv = (float *)(sd + uvOff);
