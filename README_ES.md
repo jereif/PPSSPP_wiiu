@@ -52,7 +52,8 @@ No hace falta ningún archivo de BIOS de PSP: PPSSPP funciona mediante emulació
 
 ## Juegos probados y compatibilidad
 
-Hoja completa de compatibilidad: [Lista de compatibilidad PPSSPP Wii U (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)
+Consulta la hoja de compatibilidad de la comunidad y reporta ahí mismo los juegos que vayas probando (Game ID, FPS y notas gráficas/de audio):
+**[Lista de compatibilidad PPSSPP Wii U (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)**
 
 | Juego | Estado | Rendimiento observado | Notas / Problemas conocidos |
 |---|---|---|---|
@@ -62,8 +63,6 @@ Hoja completa de compatibilidad: [Lista de compatibilidad PPSSPP Wii U (Google S
 | **God of War: Chains of Olympus** | Jugable | 30–45 FPS | Algunos glitches en sprites 2D. |
 | **GTA: Liberty City Stories** | Jugable | 25–40 FPS | Glitch menor en la cabeza/malla del personaje. |
 | **GTA: Chinatown Wars** | Jugable | 50–60 FPS | Funciona fluido. |
-
-> ¿Probaste algún otro juego o encontraste un fallo concreto? Puedes abrir un Issue indicando el Game ID y los detalles.
 
 ---
 

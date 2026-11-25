@@ -52,7 +52,8 @@ No PSP BIOS file is required — PPSSPP uses High-Level Emulation (HLE).
 
 ## Tested Games & Compatibility
 
-Full community compatibility sheet: [PPSSPP Wii U Compatibility List (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)
+Check the community compatibility sheet and report any games you test directly in it (Game ID, FPS, and graphical/audio notes):
+**[PPSSPP Wii U Compatibility List (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)**
 
 | Game | Status | Observed Performance | Notes / Known Issues |
 |---|---|---|---|
@@ -62,8 +63,6 @@ Full community compatibility sheet: [PPSSPP Wii U Compatibility List (Google She
 | **God of War: Chains of Olympus** | Playable | 30–45 FPS | Some 2D sprite glitches. |
 | **GTA: Liberty City Stories** | Playable | 25–40 FPS | Minor character head/mesh glitch. |
 | **GTA: Chinatown Wars** | Playable | 50–60 FPS | Runs smoothly. |
-
-> Found a game that works well or has a specific bug? Feel free to open an Issue with the Game ID and your findings.
 
 ---
 
