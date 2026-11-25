@@ -274,7 +274,8 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 	uint64_t dirty = gstate_c.GetDirtyUniforms();
 	if (dirty != 0) {
 		u64 uboT0 = OSGetSystemTime();
-		const bool useLights = !lastVShader_ || lastVShader_->ID().Bit(VS_BIT_LIGHTING_ENABLE);
+		const bool useLights = !lastVShader_ || lastVShader_->ID().Bit(VS_BIT_LIGHTING_ENABLE) ||
+			((GETexMapMode)lastVShader_->ID().Bits(VS_BIT_UVGEN_MODE, 2) == GE_TEXMAP_ENVIRONMENT_MAP);
 		const bool useBones = !lastVShader_ || lastVShader_->ID().Bit(VS_BIT_ENABLE_BONES);
 		uint64_t deferred = 0;
 
@@ -299,13 +300,9 @@ uint64_t ShaderManagerGX2::UpdateUniforms(PushBufferGX2 *push, bool useBufferedR
 			if (useBones) {
 				BoneUpdateUniforms(&ub_bones, dirty);
 				push_bones = (u32 *)push->BeginPush(nullptr, sizeof(ub_bones));
-				size_t boneU32s = sizeof(ub_bones) / 4;
-				if (lastVShader_) {
-					size_t usedBones = (size_t)(lastVShader_->ID().Bits(VS_BIT_BONES, 3) + 1);
-					if (usedBones < 8)
-						boneU32s = usedBones * 12;
-				}
-				CopySwapU32(push_bones, (const u32 *)&ub_bones, boneU32s);
+				// Always copy all 8 bones: a later draw may use more bones without re-uploading
+				// bone matrices (e.g. GTA head / Tekken limbs sharing a skeleton).
+				CopySwapU32(push_bones, (const u32 *)&ub_bones, sizeof(ub_bones) / 4);
 			} else {
 				deferred |= (dirty & DIRTY_BONE_UNIFORMS);
 			}

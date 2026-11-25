@@ -171,10 +171,12 @@ void FramebufferManagerGX2::DrawActiveTexture(float x, float y, float w, float h
 	GX2SetPixelSampler((flags & DRAWTEX_LINEAR) ? &StockGX2::samplerLinear2DClamp : &StockGX2::samplerPoint2DClamp, 0);
 	GX2SetAttribBuffer(0, sizeof(coord), sizeof(*coord), quadBuffer_);
 	GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
+	shaderManagerGX2_->DirtyLastShader();
 	gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE);
 }
 
 void FramebufferManagerGX2::Bind2DShader() {
+	shaderManagerGX2_->DirtyLastShader();
 	GX2SetFetchShader(&quadFetchShader_);
 	GX2SetPixelShader(&defPShaderGX2);
 	GX2SetVertexShader(&defVShaderGX2);

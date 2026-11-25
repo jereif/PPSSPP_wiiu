@@ -124,7 +124,8 @@ bool FramebufferManagerGX2::NotifyStencilUpload(u32 addr, int size, StencilUploa
 		GX2SetAttribBuffer(0, 4 * quadStride_, quadStride_, fsQuadBuffer_);
 		GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
 
-		gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
+		shaderManagerGX2_->DirtyLastShader();
+		gstate_c.Dirty(DIRTY_BLEND_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_RASTER_STATE | DIRTY_VIEWPORTSCISSOR_STATE);
 		return true;
 	}
 
