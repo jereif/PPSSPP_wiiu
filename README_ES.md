@@ -4,7 +4,10 @@
 
 Port experimental optimizado de **PPSSPP** (emulador de PlayStation Portable) para **Nintendo Wii U** (Aroma), con backend gráfico nativo **GX2** y recompilador JIT MIPS/VFPU para **PowerPC 750CL (Espresso)**.
 
-> **Nota:** Esta es una compilación experimental para la comunidad orientada a pruebas. El rendimiento y la compatibilidad varían según el juego y todavía pueden presentarse fallos gráficos menores en algunos títulos.
+> **Notas:**
+> - Esta es una compilación experimental para la comunidad orientada a pruebas. El rendimiento y la compatibilidad varían según el juego y todavía pueden presentarse fallos gráficos menores en algunos títulos.
+> - **Desarrollo asistido por IA:** Se utilizaron herramientas de IA para analizar cuellos de botella e implementar las optimizaciones del JIT y GX2 en Wii U.
+> - **Estado del proyecto:** Este repositorio se entrega tal cual y probablemente ya no reciba más actualizaciones.
 
 ---
 
