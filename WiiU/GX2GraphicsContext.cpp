@@ -108,20 +108,14 @@ bool GX2GraphicsContext::Init() {
 	}
 	GX2Invalidate(GX2_INVALIDATE_MODE_CPU, depth_buffer_.surface.image, depth_buffer_.surface.imageSize);
 
-	{
-		FILE *f = fopen("sd:/ppsspp_boot.log", "a");
-		if (f) {
-			fprintf(f, "gx2: MEM1_avail=%u MEMBucket_avail=%u MEM2_avail=%u\n",
-				MEM1_avail(), MEMBucket_avail(), MEM2_avail());
-			fprintf(f, "gx2: tv=%p drc=%p color=%p depth=%p\n",
-				tv_scan_buffer_, drc_scan_buffer_, color_buffer_.surface.image, depth_buffer_.surface.image);
-			fprintf(f, "gx2: color %ux%u pitch=%u tile=%u size=%u align=%u\n",
-				color_buffer_.surface.width, color_buffer_.surface.height,
-				color_buffer_.surface.pitch, color_buffer_.surface.tileMode,
-				color_buffer_.surface.imageSize, color_buffer_.surface.alignment);
-			fclose(f);
-		}
-	}
+	NOTICE_LOG(G3D, "gx2: MEM1_avail=%u MEMBucket_avail=%u MEM2_avail=%u",
+		MEM1_avail(), MEMBucket_avail(), MEM2_avail());
+	NOTICE_LOG(G3D, "gx2: tv=%p drc=%p color=%p depth=%p",
+		tv_scan_buffer_, drc_scan_buffer_, color_buffer_.surface.image, depth_buffer_.surface.image);
+	NOTICE_LOG(G3D, "gx2: color %ux%u pitch=%u tile=%u size=%u align=%u",
+		color_buffer_.surface.width, color_buffer_.surface.height,
+		color_buffer_.surface.pitch, color_buffer_.surface.tileMode,
+		color_buffer_.surface.imageSize, color_buffer_.surface.alignment);
 
 	ctx_state_ = (GX2ContextState *)MEM2_alloc(sizeof(GX2ContextState), GX2_CONTEXT_STATE_ALIGNMENT);
 	GX2SetupContextStateEx(ctx_state_, GX2_TRUE);

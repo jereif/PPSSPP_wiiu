@@ -62,21 +62,12 @@ void System_SendMessage(const char *command, const char *parameter) {
 }
 
 static void BootLog(const char *msg) {
-	FILE *f = fopen("sd:/ppsspp_boot.log", "a");
-	if (f) {
-		fprintf(f, "%s\n", msg);
-		fclose(f);
-	}
+	(void)msg;
 }
 
 #include <cstdarg>
 extern "C" void WiiUTrace(const char *fmt, ...) {
-	char buf[512];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	BootLog(buf);
+	(void)fmt;
 }
 
 int main(int argc, char **argv) {
@@ -113,12 +104,11 @@ int main(int argc, char **argv) {
 	}
 	const char *argv_[] = {
 		app_path.c_str(),
-		"--log=sd:/ppsspp.log",
 		"-v",
 		autoboot.empty() ? nullptr : autoboot.c_str(),
 		nullptr
 	};
-	NativeInit(autoboot.empty() ? 3 : 4, argv_, g_app_dir.c_str(), g_app_dir.c_str(), nullptr);
+	NativeInit(autoboot.empty() ? 2 : 3, argv_, g_app_dir.c_str(), g_app_dir.c_str(), nullptr);
 	BootLog("main: NativeInit done");
 #if 0
 	UpdateScreenScale(854,480);
