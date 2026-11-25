@@ -58,15 +58,6 @@ No hace falta ningún archivo de BIOS de PSP: PPSSPP funciona mediante emulació
 Consulta la hoja de compatibilidad de la comunidad y reporta ahí mismo los juegos que vayas probando (Game ID, FPS y notas gráficas/de audio):
 **[Lista de compatibilidad PPSSPP Wii U (Google Sheets)](https://docs.google.com/spreadsheets/d/1xdpvZjI92Se57OirUxY-D7OrPpR9esePtuLJ4PZaUxA/edit?usp=sharing)**
 
-| Juego | Estado | Rendimiento observado | Notas / Problemas conocidos |
-|---|---|---|---|
-| **Tekken 6** | Jugable | ~45–60 FPS | Renderizado de personajes/huesos corregido en GX2. |
-| **Silent Hill: Shattered Memories** | Jugable | 45–60 FPS (25+ FPS en exteriores muy cargados) | Fluido en interiores y la mayoría de exteriores; las zonas exteriores más densas dependen de CPU/vértices. |
-| **God of War: Ghost of Sparta** | Jugable | 38–51 FPS (28–38 FPS en combates de 950+ draws) | Algunos glitches en sprites 2D. |
-| **God of War: Chains of Olympus** | Jugable | 30–45 FPS | Algunos glitches en sprites 2D. |
-| **GTA: Liberty City Stories** | Jugable | 25–40 FPS | Glitch menor en la cabeza/malla del personaje. |
-| **GTA: Chinatown Wars** | Jugable | 50–60 FPS | Funciona fluido. |
-
 ---
 
 ## Limitaciones conocidas
