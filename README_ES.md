@@ -92,6 +92,7 @@ ninja -C build-wiiu PPSSPP
 
 - **PPSSPP** fue creado por **Henrik Rydgård** y sus colaboradores ([ppsspp.org](https://www.ppsspp.org/) | [github.com/hrydgard/ppsspp](https://github.com/hrydgard/ppsspp)).
 - **Port base de Wii U:** Basado en el port de Wii U de **aliaspider** ([github.com/aliaspider/ppsspp/tree/wiiu](https://github.com/aliaspider/ppsspp/tree/wiiu)), que trajo la compatibilidad inicial de Wii U, GX2 y el JIT PowerPC.
+- **Asistencia en optimizaciones y depuración en Wii U:** **Antigravity** (Google DeepMind).
 - Compilado con el ecosistema homebrew de **devkitPro / libwiiu / GX2**.
 - Partes del emulador incluyen definiciones y cabeceras de **PSPSDK** (licencia compatible con BSD).
 
