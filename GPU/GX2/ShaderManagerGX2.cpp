@@ -211,8 +211,29 @@ void ShaderManagerGX2::DirtyLastShader() {
 
 static inline void CopySwapU32(u32 * __restrict dst, const u32 * __restrict src, size_t count) {
 #if defined(__wiiu__) || defined(__PPC__)
-	const uintptr_t o4 = 4, o8 = 8, o12 = 12;
+	const uintptr_t o4 = 4, o8 = 8, o12 = 12, o16 = 16, o20 = 20, o24 = 24, o28 = 28;
 	size_t i = 0;
+	if (((uintptr_t)dst & 31) == 0) {
+		for (; i + 8 <= count; i += 8, src += 8, dst += 8) {
+			// Allocate cold 32-byte ring-buffer cache line directly in L1 (avoids MEM2 Read-For-Ownership).
+			asm volatile("dcbz 0, %0" : : "b"(dst) : "memory");
+			u32 a = src[0], b = src[1], c = src[2], d = src[3];
+			u32 e = src[4], f = src[5], g = src[6], h = src[7];
+			asm volatile(
+				"stwbrx %0, 0, %8\n\t"
+				"stwbrx %1, %8, %9\n\t"
+				"stwbrx %2, %8, %10\n\t"
+				"stwbrx %3, %8, %11\n\t"
+				"stwbrx %4, %8, %12\n\t"
+				"stwbrx %5, %8, %13\n\t"
+				"stwbrx %6, %8, %14\n\t"
+				"stwbrx %7, %8, %15\n\t"
+				:
+				: "r"(a), "r"(b), "r"(c), "r"(d), "r"(e), "r"(f), "r"(g), "r"(h),
+				  "b"(dst), "r"(o4), "r"(o8), "r"(o12), "r"(o16), "r"(o20), "r"(o24), "r"(o28)
+				: "memory");
+		}
+	}
 	for (; i + 4 <= count; i += 4, src += 4, dst += 4) {
 		u32 a = src[0];
 		u32 b = src[1];

@@ -399,6 +399,108 @@ static void DecodeSkinnedU8T(
 }
 #endif
 
+// Zero-branch specialized inner loop (2x unrolled) for hot hardware-skinned vertex formats (wt != 0, !swSkin).
+template <int WT, int TC, int COL, int NRM, int POS>
+static void DecodeHWSkinnedT(
+	const u8 * __restrict p, u8 * __restrict d, int count,
+	int inSize, int stride, int nw, int numBones,
+	int tcOff, int uvOff, float uMul, float vMul, float uAdd, float vAdd,
+	int cOff, int dc0Off, int nOff, int dnOff, int pOff, int dpOff,
+	bool &fullAlpha) {
+	const float * __restrict u8Lut = (WT == 1 || TC == 1) ? GetU8Div128Lut() : nullptr;
+	const float * __restrict s8Lut = (NRM == 1 || POS == 1) ? GetS8Div128Lut() : nullptr;
+	auto decodeOne = [&](const u8 * __restrict sp, u8 * __restrict sd) {
+		float *outW = (float *)sd;
+		if (WT == 3) {
+			const u32_le *wf = (const u32_le *)sp;
+			u32 *outWu = (u32 *)sd;
+			for (int j = 0; j < nw; ++j)
+				outWu[j] = wf[j];
+			for (int j = nw; j < numBones; ++j)
+				outWu[j] = 0;
+		} else if (WT == 1) {
+			for (int j = 0; j < nw; ++j)
+				outW[j] = u8Lut[sp[j]];
+			for (int j = nw; j < numBones; ++j)
+				outW[j] = 0.0f;
+		} else {
+			const u16_le *w16 = (const u16_le *)sp;
+			for (int j = 0; j < nw; ++j)
+				outW[j] = (float)w16[j] * (1.0f / 32768.0f);
+			for (int j = nw; j < numBones; ++j)
+				outW[j] = 0.0f;
+		}
+		if (TC == 2) {
+			float *uv = (float *)(sd + uvOff);
+			const u16_le *uv16 = (const u16_le *)(sp + tcOff);
+			uv[0] = (float)uv16[0] * uMul + uAdd;
+			uv[1] = (float)uv16[1] * vMul + vAdd;
+		} else if (TC == 1) {
+			float *uv = (float *)(sd + uvOff);
+			uv[0] = u8Lut[sp[tcOff]] * uMul + uAdd;
+			uv[1] = u8Lut[sp[tcOff + 1]] * vMul + vAdd;
+		} else if (TC == 3) {
+			float *uv = (float *)(sd + uvOff);
+			const float_le *uvf = (const float_le *)(sp + tcOff);
+			uv[0] = uvf[0] * uMul + uAdd;
+			uv[1] = uvf[1] * vMul + vAdd;
+		}
+		if (COL == 7) {
+			u32 cdata = *(const u32_le *)(sp + cOff);
+			fullAlpha &= ((cdata >> 24) == 0xFF);
+			*(u32_le *)(sd + dc0Off) = cdata;
+		}
+		if (NRM == 1) {
+			float *no = (float *)(sd + dnOff);
+			const u8 *sv = sp + nOff;
+			no[0] = s8Lut[sv[0]];
+			no[1] = s8Lut[sv[1]];
+			no[2] = s8Lut[sv[2]];
+		} else if (NRM == 2) {
+			s16 *no = (s16 *)(sd + dnOff);
+			const s16_le *sv = (const s16_le *)(sp + nOff);
+			no[0] = sv[0];
+			no[1] = sv[1];
+			no[2] = sv[2];
+			no[3] = 0;
+		} else if (NRM == 3) {
+			u32 *no = (u32 *)(sd + dnOff);
+			const u32_le *fv = (const u32_le *)(sp + nOff);
+			no[0] = fv[0];
+			no[1] = fv[1];
+			no[2] = fv[2];
+		}
+		if (POS == 3) {
+			u32 *po = (u32 *)(sd + dpOff);
+			const u32_le *pv = (const u32_le *)(sp + pOff);
+			po[0] = pv[0];
+			po[1] = pv[1];
+			po[2] = pv[2];
+		} else if (POS == 2) {
+			float *po = (float *)(sd + dpOff);
+			const s16_le *pv = (const s16_le *)(sp + pOff);
+			po[0] = (float)pv[0] * (1.0f / 32768.0f);
+			po[1] = (float)pv[1] * (1.0f / 32768.0f);
+			po[2] = (float)pv[2] * (1.0f / 32768.0f);
+		} else {
+			float *po = (float *)(sd + dpOff);
+			const u8 *pv = sp + pOff;
+			po[0] = s8Lut[pv[0]];
+			po[1] = s8Lut[pv[1]];
+			po[2] = s8Lut[pv[2]];
+		}
+	};
+	for (; count >= 2; count -= 2) {
+		decodeOne(p, d);
+		decodeOne(p + inSize, d + stride);
+		p += inSize * 2;
+		d += stride * 2;
+	}
+	if (count) {
+		decodeOne(p, d);
+	}
+}
+
 // Zero-branch specialized inner loop (2x unrolled to hide PPC int->float store-forwarding stalls).
 template <int TC, int COL, int NRM, int POS>
 static void DecodeNonSkinnedT(
@@ -1931,6 +2033,47 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 		}
 #endif
 
+		// Zero-branch specialized dispatch for hot hardware-skinned PSP vertex formats (e.g. GoW 0x0007be, Silent Hill 0x0083e3).
+		if (wt && !swSkin && (colFmt == 0 || colFmt == 7) && (posFmt == 2 || posFmt == 3)) {
+			const float tcUMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.uScale : 1.0f) : uMul;
+			const float tcVMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.vScale : 1.0f) : vMul;
+			const u32 key = (wt << 10) | (tcFmt << 8) | (colFmt << 4) | (nrmFmt << 2) | posFmt;
+			bool handled = true;
+			switch (key) {
+#define DISPATCH_HWSK(W, T, C, N, P) \
+	case ((W << 10) | (T << 8) | (C << 4) | (N << 2) | P): \
+		DecodeHWSkinnedT<W, T, C, N, P>(p, d, count, inSize, stride, nw, numBones, tcOff, uvOff, tcUMul, tcVMul, uAdd, vAdd, cOff, dc0Off, nOff, dnOff, pOff, dpOff, fullAlpha); \
+		break
+			DISPATCH_HWSK(3, 2, 7, 1, 3); // GoW 0x0007be
+			DISPATCH_HWSK(3, 2, 0, 1, 3);
+			DISPATCH_HWSK(3, 2, 7, 1, 2);
+			DISPATCH_HWSK(3, 2, 0, 1, 2);
+			DISPATCH_HWSK(3, 2, 7, 0, 3);
+			DISPATCH_HWSK(3, 3, 0, 3, 3);
+			DISPATCH_HWSK(1, 3, 0, 3, 3); // Silent Hill 0x0083e3
+			DISPATCH_HWSK(1, 2, 0, 1, 2);
+			DISPATCH_HWSK(1, 2, 7, 1, 2);
+			DISPATCH_HWSK(1, 2, 0, 0, 2);
+			DISPATCH_HWSK(1, 2, 7, 0, 2);
+			DISPATCH_HWSK(1, 2, 0, 2, 2);
+			DISPATCH_HWSK(2, 2, 0, 1, 2);
+			DISPATCH_HWSK(2, 2, 7, 1, 2);
+			DISPATCH_HWSK(2, 2, 0, 2, 2);
+#undef DISPATCH_HWSK
+			default:
+				handled = false;
+				break;
+			}
+			if (handled) {
+#ifdef __wiiu__
+				g_vdecStats.skFastVerts += (u64)count;
+				TrackVdecType(fmt_ & 0xFFFFFF, (u64)count);
+#endif
+				gstate_c.vertexFullAlpha = fullAlpha;
+				return;
+			}
+		}
+
 		// Zero-branch specialized dispatch for the hottest non-skinned PSP vertex formats.
 		if (!wt && (colFmt == 0 || colFmt >= 4)) {
 			const float tcUMul = (tcFmt == 1) ? (prescale ? gstate_c.uv.uScale : 1.0f) : uMul;
@@ -1958,6 +2101,8 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 			DISPATCH_NS(2, 7, 1, 3);
 			DISPATCH_NS(3, 0, 3, 3);
 			DISPATCH_NS(3, 7, 3, 3);
+			DISPATCH_NS(3, 0, 2, 3);
+			DISPATCH_NS(3, 7, 2, 3); // 0x0011df
 			DISPATCH_NS(3, 0, 0, 3);
 			DISPATCH_NS(3, 7, 0, 3);
 			DISPATCH_NS(3, 0, 1, 3);
@@ -1970,6 +2115,8 @@ void VertexDecoder::DecodeVerts(u8 *decodedptr, const void *verts, int indexLowe
 			DISPATCH_NS(0, 0, 1, 2);
 			DISPATCH_NS(0, 0, 0, 2);
 			DISPATCH_NS(0, 0, 0, 3);
+			DISPATCH_NS(1, 0, 3, 2); // 0x001161
+			DISPATCH_NS(1, 7, 3, 2);
 			DISPATCH_NS(1, 7, 0, 2);
 			DISPATCH_NS(1, 0, 1, 2);
 			DISPATCH_NS(1, 7, 0, 1);

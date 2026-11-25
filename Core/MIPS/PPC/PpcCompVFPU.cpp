@@ -1801,10 +1801,47 @@ namespace MIPSComp
 		}
 	}
 
+	static void PpcVfpuVf2hHelper(MIPSState *mips, u32 opEncoding) {
+		MIPSOpcode op(opEncoding);
+		VectorSize sz = GetVecSize(op);
+		int n = GetNumVectorElements(sz);
+		u8 sregs[4], dregs[2];
+		GetVectorRegs(sregs, sz, _VS);
+		float s[4] = {};
+		for (int i = 0; i < n; i++)
+			s[i] = mips->v[voffset[sregs[i]]];
+		VectorSize oz = (sz == V_Triple || sz == V_Quad) ? V_Pair : V_Single;
+		GetVectorRegs(dregs, oz, _VD);
+		u32 d0 = (u32)ShrinkToHalf(s[0]) | ((u32)ShrinkToHalf(s[1]) << 16);
+		memcpy(&mips->v[voffset[dregs[0]]], &d0, 4);
+		if (oz == V_Pair) {
+			u32 d1 = (u32)ShrinkToHalf(s[2]) | ((u32)ShrinkToHalf(s[3]) << 16);
+			memcpy(&mips->v[voffset[dregs[1]]], &d1, 4);
+		}
+	}
+
 	void Jit::Comp_Vh2f(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
 		if (js.MayHavePrefix() || disablePrefixes) {
 			DISABLE;
+		}
+		if (((op >> 16) & 0x1F) == 18) { // vf2h
+			VectorSize sz = GetVecSize(op);
+			VectorSize oz = (sz == V_Triple || sz == V_Quad) ? V_Pair : V_Single;
+			int n = GetNumVectorElements(sz);
+			int on = GetNumVectorElements(oz);
+			u8 sregs[4], dregs[2];
+			GetVectorRegs(sregs, sz, _VS);
+			GetVectorRegs(dregs, oz, _VD);
+			for (int i = 0; i < n; i++)
+				fpr.FlushV(sregs[i]);
+			for (int i = 0; i < on; i++)
+				fpr.DiscardV(dregs[i]);
+			MR(R3, CTXREG);
+			MOVI2R(R4, op.encoding);
+			QuickCallFunction((void *)&PpcVfpuVf2hHelper);
+			fpr.ReleaseSpillLocksAndDiscardTemps();
+			return;
 		}
 		VectorSize sz = GetVecSize(op);
 		VectorSize oz = (sz == V_Single) ? V_Pair : V_Quad;

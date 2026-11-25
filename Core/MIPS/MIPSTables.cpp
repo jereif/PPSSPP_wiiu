@@ -604,7 +604,11 @@ const MIPSInstruction tableVFPU7[32] = // 110100 00001 xxxxx . ....... . .......
 	//16
 	INVALID,
 	INVALID,
+#if PPSSPP_ARCH(POWERPC)
+	INSTR("vf2h", JITFUNC(Comp_Vh2f), Dis_Vf2h, Int_Vf2h, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
+#else
 	INSTR("vf2h", JITFUNC(Comp_Generic), Dis_Vf2h, Int_Vf2h, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
+#endif
 	INSTR("vh2f", JITFUNC(Comp_Vh2f), Dis_Vh2f, Int_Vh2f, IN_OTHER|OUT_OTHER|IS_VFPU|OUT_EAT_PREFIX),
 
 	INVALID,

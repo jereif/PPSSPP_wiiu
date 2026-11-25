@@ -608,6 +608,14 @@ using namespace PpcJitConstants;
 		}
 	}
 
+	static u32 PpcBitrev32(u32 v) {
+		v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
+		v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
+		v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
+		v = ((v >> 8) & 0x00FF00FFu) | ((v & 0x00FF00FFu) << 8);
+		return (v >> 16) | (v << 16);
+	}
+
 	void Jit::Comp_Allegrex(MIPSOpcode op) {
 		CONDITIONAL_DISABLE;
 		MIPSGPReg rt = _RT;
@@ -624,6 +632,16 @@ using namespace PpcJitConstants;
 				EXTSB(gpr.R(rd), gpr.R(rt));
 			}
 			break;
+		case 20: // bitrev
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, PpcBitrev32(gpr.GetImm(rt)));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				MR(R3, gpr.R(rt));
+				QuickCallFunction((void *)&PpcBitrev32);
+				MR(gpr.R(rd), R3);
+			}
+			break;
 		case 24: // seh
 			if (gpr.IsImm(rt)) {
 				gpr.SetImm(rd, (u32)(s32)(s16)(u16)gpr.GetImm(rt));
@@ -638,8 +656,46 @@ using namespace PpcJitConstants;
 		}
 	}
 
+	static u32 PpcWsbh(u32 v) {
+		return ((v & 0xFF00FF00u) >> 8) | ((v & 0x00FF00FFu) << 8);
+	}
+
+	static u32 PpcWsbw(u32 v) {
+		return __builtin_bswap32(v);
+	}
+
 	void Jit::Comp_Allegrex2(MIPSOpcode op) {
-		Comp_Generic(op);
+		CONDITIONAL_DISABLE;
+		MIPSGPReg rt = _RT;
+		MIPSGPReg rd = _RD;
+		if (rd == 0)
+			return;
+
+		switch (op & 0x3FF) {
+		case 0xA0: // wsbh
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, PpcWsbh(gpr.GetImm(rt)));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				MR(R3, gpr.R(rt));
+				QuickCallFunction((void *)&PpcWsbh);
+				MR(gpr.R(rd), R3);
+			}
+			break;
+		case 0xE0: // wsbw
+			if (gpr.IsImm(rt)) {
+				gpr.SetImm(rd, PpcWsbw(gpr.GetImm(rt)));
+			} else {
+				gpr.MapDirtyIn(rd, rt);
+				MR(R3, gpr.R(rt));
+				QuickCallFunction((void *)&PpcWsbw);
+				MR(gpr.R(rd), R3);
+			}
+			break;
+		default:
+			Comp_Generic(op);
+			break;
+		}
 	}
 
 	void Jit::Comp_MulDivType(MIPSOpcode op) {
