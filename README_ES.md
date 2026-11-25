@@ -62,6 +62,7 @@ Consulta la hoja de compatibilidad de la comunidad y reporta ahí mismo los jueg
 
 ## Limitaciones conocidas
 
+- **Demora al salir de los juegos:** Cerrar o salir de un juego tarda entre **15 y 30 segundos** en volver al menú (espera un momento sin apagar la consola).
 - **Tamaño de la caché JIT:** El espacio RWX de Wii U es de ~1.78 MB; juegos con muchísimo código ejecutable pueden vaciar y recompilar la caché JIT ocasionalmente.
 - **Techo de hardware:** Espresso es una CPU PowerPC 750CL in-order de 3 núcleos a 1.24 GHz, por lo que escenas con más de 1,000 draw calls por frame o carga pesada de CPU no siempre mantendrán 60 FPS constantes.
 - **Combinaciones raras de shaders GX2:** Algunas combinaciones poco frecuentes de pixel shaders de PSP (por ejemplo ciertos modos de color-test o logic-op) usan el shader genérico de respaldo.

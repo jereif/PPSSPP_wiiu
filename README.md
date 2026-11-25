@@ -62,6 +62,7 @@ Check the community compatibility sheet and report any games you test directly i
 
 ## Known Limitations
 
+- **Game Exit Delay:** Closing/exiting a running game takes around **15–30 seconds** before returning to the menu (wait briefly and do not force-power-off the console).
 - **JIT Code Cache Size:** Wii U's RWX code space is ~1.78 MB; games with very large code footprints may occasionally flush and recompile the JIT cache.
 - **Hardware Ceiling:** Espresso is a 3-core 1.24 GHz in-order PowerPC 750CL CPU, so games pushing 1,000+ draw calls per frame or heavy CPU workloads will not always hold a locked 60 FPS.
 - **Minor GX2 Shader Gaps:** A few rare PSP pixel-shader combinations (e.g. certain color-test / logic-op paths) fall back to the generic shader.
